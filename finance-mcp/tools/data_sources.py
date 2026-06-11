@@ -3138,6 +3138,9 @@ def _load_runtime_source(
 ) -> dict[str, Any]:
     source_id = str(source_row.get("id") or "")
     configs = _load_source_configs(source_id)
+    embedded_config = source_row.get("config")
+    if not isinstance(embedded_config, dict):
+        embedded_config = {}
     credential = auth_db.get_unified_data_source_credentials(
         data_source_id=source_id,
         credential_type="default",
@@ -3145,15 +3148,19 @@ def _load_runtime_source(
     )
     runtime_source = {
         **source_row,
-        "connection_config": configs.get("connection") or {},
-        "extract_config": configs.get("extract") or {},
-        "mapping_config": configs.get("mapping") or {},
-        "runtime_config": configs.get("runtime") or {},
+        "connection_config": configs.get("connection")
+        or dict(embedded_config.get("connection_config") or {}),
+        "extract_config": configs.get("extract")
+        or dict(embedded_config.get("extract_config") or {}),
+        "mapping_config": configs.get("mapping")
+        or dict(embedded_config.get("mapping_config") or {}),
+        "runtime_config": configs.get("runtime")
+        or dict(embedded_config.get("runtime_config") or {}),
         "auth_config": dict((credential or {}).get("credential_payload") or {}),
     }
     try:
         connector = build_connector(runtime_source)
-        runtime_source["capabilities"] = connector.capabilities
+        runtime_source["capabilities"] = list(getattr(connector, "capabilities", []))
     except ValueError:
         if str(source_row.get("source_kind") or "") != "browser_playbook":
             raise
@@ -3409,6 +3416,149 @@ def _build_dataset_view(dataset_row: dict[str, Any], *, include_heavy: bool = Tr
         "semantic_fields": semantic_flat["semantic_fields"],
         "low_confidence_fields": semantic_flat["low_confidence_fields"],
     }
+
+
+def _is_database_source_row(source_row: dict[str, Any] | None) -> bool:
+    return _safe_text((source_row or {}).get("source_kind")).lower() == "database"
+
+
+def _extract_preview_sample(dataset_row: dict[str, Any] | None) -> dict[str, Any]:
+    dataset_meta = (dataset_row or {}).get("meta")
+    meta = dataset_meta if isinstance(dataset_meta, dict) else {}
+    sample = meta.get("preview_sample") if isinstance(meta, dict) else {}
+    return dict(sample or {}) if isinstance(sample, dict) else {}
+
+
+def _preview_sample_rows(sample: dict[str, Any] | None, limit: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in (sample or {}).get("rows") or []:
+        if isinstance(row, dict):
+            rows.append(dict(row))
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _preview_sample_order(
+    *,
+    preview_order: dict[str, Any] | None = None,
+    previous_sample: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    order_source = (
+        preview_order
+        if isinstance(preview_order, dict) and preview_order
+        else previous_sample or {}
+    )
+    order = _safe_text(order_source.get("order")) or "connector_default"
+    order_field = _safe_text(order_source.get("order_field"))
+    return order, order_field
+
+
+def _build_preview_sample(
+    *,
+    rows: list[dict[str, Any]] | None = None,
+    limit: int,
+    resource_key: str,
+    source: str,
+    preview_order: dict[str, Any] | None = None,
+    previous_sample: dict[str, Any] | None = None,
+    error: str = "",
+) -> dict[str, Any]:
+    sample = dict(previous_sample or {})
+    order, order_field = _preview_sample_order(
+        preview_order=preview_order,
+        previous_sample=previous_sample,
+    )
+    sample.update(
+        {
+            "limit": limit,
+            "resource_key": resource_key,
+            "source": source,
+            "order": order,
+            "order_field": order_field,
+        }
+    )
+    normalized_rows = [dict(row) for row in rows or [] if isinstance(row, dict)]
+    if error:
+        sample["rows"] = []
+        sample["row_count"] = 0
+        sample["error"] = error
+        sample["error_at"] = _now_iso()
+        return sample
+
+    sample.pop("error", None)
+    sample.pop("error_at", None)
+    if normalized_rows:
+        sample["rows"] = normalized_rows[:limit]
+        sample["row_count"] = len(sample["rows"])
+        sample["fetched_at"] = _now_iso()
+    else:
+        sample["rows"] = []
+        sample["row_count"] = 0
+        sample["fetched_at"] = _now_iso()
+    return sample
+
+
+def _update_dataset_preview_sample(
+    dataset_row: dict[str, Any],
+    preview_sample: dict[str, Any],
+) -> dict[str, Any] | None:
+    dataset_id = _safe_text(dataset_row.get("id"))
+    if not dataset_id:
+        return None
+    meta = dict(dataset_row.get("meta") or {})
+    meta["preview_sample"] = dict(preview_sample)
+    return auth_db.update_unified_data_source_dataset_meta(
+        dataset_id=dataset_id,
+        meta=meta,
+    )
+
+
+def _refresh_database_preview_sample(
+    source_row: dict[str, Any],
+    dataset_row: dict[str, Any],
+    arguments: dict[str, Any],
+    limit: int,
+    source: str,
+) -> dict[str, Any]:
+    previous_sample = _extract_preview_sample(dataset_row)
+    resource_key = _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
+    runtime_source = _merge_runtime_overrides(
+        _load_runtime_source(source_row, include_secret=True),
+        arguments,
+    )
+    connector = build_connector(runtime_source)
+    preview_arguments = {
+        **arguments,
+        "resource_key": resource_key,
+        "limit": limit,
+        "dataset": _build_dataset_view(dataset_row),
+    }
+    result = connector.preview(preview_arguments)
+    rows = [dict(row) for row in result.get("rows") or [] if isinstance(row, dict)]
+    if bool(result.get("success", True)):
+        preview_order = result.get("preview_order")
+        preview_sample = _build_preview_sample(
+            rows=rows,
+            limit=limit,
+            resource_key=resource_key,
+            source=source,
+            preview_order=preview_order if isinstance(preview_order, dict) else None,
+            previous_sample=previous_sample,
+        )
+    else:
+        preview_order = result.get("preview_order")
+        preview_sample = _build_preview_sample(
+            rows=[],
+            limit=limit,
+            resource_key=resource_key,
+            source=source,
+            preview_order=preview_order if isinstance(preview_order, dict) else None,
+            previous_sample=previous_sample,
+            error=_safe_text(result.get("error") or result.get("message") or "preview_failed"),
+        )
+    updated = _update_dataset_preview_sample(dataset_row, preview_sample)
+    return _extract_preview_sample(updated) if updated else preview_sample
 
 
 def _enrich_dataset_rows_with_source_context(*, company_id: str, dataset_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -5439,6 +5589,22 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="data_source_get_dataset_detail",
+            description="获取数据库数据集详情和最新样例数据，不包含采集任务。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    **source_id_schema,
+                    "dataset_id": {"type": "string"},
+                    "resource_key": {"type": "string"},
+                    "sample_limit": {"type": "integer"},
+                    "refresh": {"type": "boolean"},
+                },
+                "required": ["auth_token", "source_id"],
+            },
+        ),
+        Tool(
             name="data_source_upsert_dataset",
             description="创建或更新数据集目录。",
             inputSchema={
@@ -6219,6 +6385,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return await _handle_data_source_list_datasets(arguments)
         if name == "data_source_get_dataset":
             return await _handle_data_source_get_dataset(arguments)
+        if name == "data_source_get_dataset_detail":
+            return await _handle_data_source_get_dataset_detail(arguments)
         if name == "data_source_upsert_dataset":
             return await _handle_data_source_upsert_dataset(arguments)
         if name == "data_source_disable_dataset":
@@ -6580,6 +6748,22 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
                 meta=item["meta"],
             )
             if upserted:
+                if _is_database_source_row(source_row):
+                    try:
+                        _refresh_database_preview_sample(
+                            source_row,
+                            upserted,
+                            {"resource_key": item["resource_key"]},
+                            AUTO_SAMPLE_ROW_LIMIT,
+                            "dataset_discover",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "database dataset preview refresh skipped during discover: source_id=%s dataset_id=%s error=%s",
+                            source_id,
+                            _safe_text(upserted.get("id")),
+                            exc,
+                        )
                 persisted_rows.append(upserted)
             else:
                 persist_errors.append(item["dataset_code"])
@@ -9471,6 +9655,54 @@ async def _handle_data_source_list_sync_jobs(arguments: dict[str, Any]) -> dict[
     }
 
 
+async def _handle_data_source_get_dataset_detail(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user["company_id"])
+    source_id = _source_id_from_args(arguments)
+    source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
+    if not source_row:
+        return {"success": False, "error": "数据源不存在"}
+
+    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    if not dataset_row:
+        return {"success": False, "error": "数据集不存在"}
+    if _safe_text(dataset_row.get("data_source_id")) and _safe_text(dataset_row.get("data_source_id")) != source_id:
+        return {"success": False, "error": "数据集不属于当前数据源"}
+
+    sample_limit = max(1, min(int(arguments.get("sample_limit") or arguments.get("limit") or 10), 50))
+    if _is_database_source_row(source_row) and _normalize_bool(arguments.get("refresh"), default=False):
+        preview_sample = _refresh_database_preview_sample(
+            source_row,
+            dataset_row,
+            arguments,
+            sample_limit,
+            "dataset_detail",
+        )
+    else:
+        preview_sample = _extract_preview_sample(dataset_row)
+    rows = _preview_sample_rows(preview_sample, sample_limit)
+    resource_key = _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
+    row_count = len(rows)
+    if preview_sample.get("row_count") is not None:
+        try:
+            row_count = int(preview_sample.get("row_count") or 0)
+        except (TypeError, ValueError):
+            row_count = len(rows)
+
+    return {
+        "success": True,
+        "source_id": source_id,
+        "resource_key": resource_key,
+        "dataset": _build_dataset_view(dataset_row),
+        "field_groups": _build_dataset_semantic_field_groups(dataset_row),
+        "preview_sample": preview_sample,
+        "rows": rows,
+        "sample_limit": sample_limit,
+        "row_count": row_count,
+        "message": "已获取数据集详情",
+    }
+
+
 async def _handle_data_source_get_dataset_collection_detail(arguments: dict[str, Any]) -> dict[str, Any]:
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
@@ -9736,19 +9968,63 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
     user = _require_user(arguments.get("auth_token", ""))
     company_id = str(user["company_id"])
     source_id = _source_id_from_args(arguments)
-    limit = int(arguments.get("limit") or 20)
+    limit = max(1, min(int(arguments.get("limit") or 20), 100))
+    refresh = _normalize_bool(arguments.get("refresh"), default=False)
     source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
     if not source_row:
         return {"success": False, "error": "数据源不存在"}
 
     dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    if _is_database_source_row(source_row) and dataset_row:
+        if refresh:
+            preview_sample = _refresh_database_preview_sample(
+                source_row,
+                dataset_row,
+                arguments,
+                limit,
+                "data_source_preview",
+            )
+        else:
+            preview_sample = _extract_preview_sample(dataset_row)
+        rows = _preview_sample_rows(preview_sample, limit)
+        if rows:
+            return {
+                "success": True,
+                "source_id": source_id,
+                "resource_key": (
+                    _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
+                ),
+                "count": len(rows),
+                "rows": rows,
+                "preview_sample": preview_sample,
+                "message": "已返回数据集样例",
+            }
+        if refresh:
+            response = {
+                "success": not bool(preview_sample.get("error")),
+                "source_id": source_id,
+                "resource_key": (
+                    _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
+                ),
+                "count": 0,
+                "rows": [],
+                "preview_sample": preview_sample,
+                "message": "已返回数据集样例",
+            }
+            if preview_sample.get("error"):
+                response["error"] = _safe_text(preview_sample.get("error"))
+                response["message"] = _safe_text(preview_sample.get("error")) or response["message"]
+            return response
     if _dataset_uses_platform_order_lines(dataset_row):
         records = auth_db.list_platform_order_lines(
             company_id=company_id,
             data_source_id=source_id,
             dataset_id=_safe_text((dataset_row or {}).get("id")) or None,
-            resource_key=_safe_text((dataset_row or {}).get("resource_key")) or _resource_key_from_args(arguments),
-            limit=max(1, min(limit, 100)),
+            resource_key=(
+                _safe_text((dataset_row or {}).get("resource_key"))
+                or _resource_key_from_args(arguments)
+            ),
+            limit=limit,
             offset=0,
         )
         rows = [
@@ -9772,7 +10048,7 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
                 _safe_text((dataset_row or {}).get("resource_key"))
                 or _resource_key_from_args(arguments)
             ),
-            limit=max(1, min(limit, 100)),
+            limit=limit,
             offset=0,
         )
         rows = [
@@ -9787,22 +10063,26 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
             "rows": rows,
             "message": "已返回支付宝账单样例",
         }
-    collection_rows = _load_dataset_sample_rows_from_collection_records(
-        company_id=company_id,
-        data_source_id=source_id,
-        dataset_id=_safe_text((dataset_row or {}).get("id")),
-        dataset_code=_safe_text((dataset_row or {}).get("dataset_code")),
-        resource_key=_safe_text((dataset_row or {}).get("resource_key")) or _resource_key_from_args(arguments),
-        limit=limit,
-    )
-    if collection_rows:
-        return {
-            "success": True,
-            "source_id": source_id,
-            "count": len(collection_rows),
-            "rows": collection_rows,
-            "message": "已返回采集记录样例",
-        }
+    if not (_is_database_source_row(source_row) and dataset_row):
+        collection_rows = _load_dataset_sample_rows_from_collection_records(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=_safe_text((dataset_row or {}).get("id")),
+            dataset_code=_safe_text((dataset_row or {}).get("dataset_code")),
+            resource_key=(
+                _safe_text((dataset_row or {}).get("resource_key"))
+                or _resource_key_from_args(arguments)
+            ),
+            limit=limit,
+        )
+        if collection_rows:
+            return {
+                "success": True,
+                "source_id": source_id,
+                "count": len(collection_rows),
+                "rows": collection_rows,
+                "message": "已返回采集记录样例",
+            }
 
     runtime_source = _load_runtime_source(source_row, include_secret=True)
     if runtime_source["source_kind"] == "platform_oauth":
@@ -9830,22 +10110,67 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
             "success": bool(result.get("success", True)),
             "source_id": source_id,
             "count": min(len(rows), limit),
-            "rows": rows[: max(1, min(limit, 100))],
+            "rows": rows[:limit],
             "message": str(result.get("message") or ""),
         }
 
     connector = build_connector(runtime_source)
-    result = connector.preview(arguments)
+    preview_arguments = dict(arguments)
+    preview_arguments["limit"] = limit
+    if dataset_row:
+        preview_arguments["resource_key"] = (
+            _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
+        )
+        preview_arguments["dataset"] = _build_dataset_view(dataset_row)
+    result = connector.preview(preview_arguments)
     rows = []
     for row in result.get("rows") or []:
         if isinstance(row, dict):
             rows.append(row)
-    return {
+    rows = rows[:limit]
+    preview_sample = {}
+    if _is_database_source_row(source_row) and dataset_row:
+        if bool(result.get("success", True)):
+            preview_order = result.get("preview_order")
+            preview_sample = _build_preview_sample(
+                rows=rows,
+                limit=limit,
+                resource_key=(
+                    _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
+                ),
+                source="data_source_preview",
+                preview_order=preview_order if isinstance(preview_order, dict) else None,
+                previous_sample=_extract_preview_sample(dataset_row),
+            )
+        else:
+            preview_order = result.get("preview_order")
+            preview_sample = _build_preview_sample(
+                rows=[],
+                limit=limit,
+                resource_key=(
+                    _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
+                ),
+                source="data_source_preview",
+                preview_order=preview_order if isinstance(preview_order, dict) else None,
+                previous_sample=_extract_preview_sample(dataset_row),
+                error=_safe_text(result.get("error") or result.get("message") or "preview_failed"),
+            )
+        updated = _update_dataset_preview_sample(dataset_row, preview_sample)
+        if updated:
+            preview_sample = _extract_preview_sample(updated)
+    response = {
         "success": bool(result.get("success", True)),
         "source_id": source_id,
-        "count": len(rows[: max(1, min(limit, 100))]),
-        "rows": rows[: max(1, min(limit, 100))],
+        "count": len(rows),
+        "rows": rows,
         "message": str(result.get("message") or ""),
+    }
+    if preview_sample:
+        response["preview_sample"] = preview_sample
+        if not response["message"]:
+            response["message"] = "已返回数据集样例"
+    return {
+        **response,
     }
 
 
