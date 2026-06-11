@@ -32,6 +32,7 @@ from tools.mcp_client import (
     data_source_get_browser_playbook_detail,
     data_source_get_dataset,
     data_source_get_dataset_collection_detail,
+    data_source_get_dataset_detail,
     data_source_list_collection_records,
     data_source_list_dataset_candidates,
     data_source_get_sync_job,
@@ -561,6 +562,8 @@ class DataSourceSyncJobsListResponse(BaseModel):
 class DataSourcePreviewRequest(BaseModel):
     limit: int = 20
     mode: str = ""
+    resource_key: str = ""
+    dataset_id: str = ""
 
 
 class DataSourcePreviewResponse(BaseModel):
@@ -586,6 +589,20 @@ class DataSourceDatasetCollectionDetailResponse(BaseModel):
     jobs: list[dict[str, Any]] = Field(default_factory=list)
     rows: list[dict[str, Any]] = Field(default_factory=list)
     count: int = 0
+    row_count: int = 0
+    message: str = ""
+
+
+class DataSourceDatasetDetailResponse(BaseModel):
+    success: bool
+    mode: str = "mock"
+    source_id: str = ""
+    resource_key: str = ""
+    dataset: dict[str, Any] | None = None
+    field_groups: list[dict[str, Any]] = Field(default_factory=list)
+    preview_sample: dict[str, Any] = Field(default_factory=dict)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    sample_limit: int = 10
     row_count: int = 0
     message: str = ""
 
@@ -1435,6 +1452,48 @@ async def list_sync_jobs(
 
 
 @router.get(
+    "/data-sources/{source_id}/datasets/{dataset_id}/detail",
+    response_model=DataSourceDatasetDetailResponse,
+)
+async def get_dataset_detail(
+    source_id: str,
+    dataset_id: str,
+    resource_key: str = Query("", description="可选：物理资源 key；为空时按 dataset_id 查找"),
+    sample_limit: int = Query(10, ge=1, le=50, description="样本行数量"),
+    refresh: bool = Query(False, description="是否实时刷新样本"),
+    mode: str = Query("", description="mock 或 real；为空时使用服务默认模式"),
+    authorization: Optional[str] = Header(None),
+):
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    result = await data_source_get_dataset_detail(
+        auth_token,
+        source_id,
+        dataset_id=dataset_id,
+        resource_key=resource_key,
+        sample_limit=sample_limit,
+        refresh=refresh,
+        mode=mode,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "获取数据集详情失败"))
+    return DataSourceDatasetDetailResponse(
+        success=True,
+        mode=str(result.get("mode") or mode or "mock"),
+        source_id=str(result.get("source_id") or source_id),
+        resource_key=str(result.get("resource_key") or resource_key or ""),
+        dataset=result.get("dataset"),
+        field_groups=result.get("field_groups") or [],
+        preview_sample=result.get("preview_sample") or {},
+        rows=result.get("rows") or [],
+        sample_limit=int(result.get("sample_limit") or sample_limit),
+        row_count=int(result.get("row_count") or len(result.get("rows") or [])),
+        message=str(result.get("message") or ""),
+    )
+
+
+@router.get(
     "/data-sources/{source_id}/datasets/{dataset_id}/collection-detail",
     response_model=DataSourceDatasetCollectionDetailResponse,
 )
@@ -1563,7 +1622,14 @@ async def preview_data_source(
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
 
-    result = await data_source_preview(auth_token, source_id, limit=body.limit, mode=body.mode)
+    result = await data_source_preview(
+        auth_token,
+        source_id,
+        limit=body.limit,
+        mode=body.mode,
+        resource_key=body.resource_key,
+        dataset_id=body.dataset_id,
+    )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "预览数据失败"))
     return DataSourcePreviewResponse(

@@ -96,3 +96,98 @@ def test_mcp_session_http_clients_ignore_proxy_environment() -> None:
         import anyio
 
         anyio.run(client.aclose)
+
+
+@pytest.mark.anyio
+async def test_preview_api_forwards_resource_key_and_dataset_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_preview(*args: object, **kwargs: object) -> dict[str, object]:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"success": True, "rows": [{"id": 1}], "count": 1}
+
+    monkeypatch.setattr(data_source_api, "data_source_preview", fake_preview)
+
+    body = data_source_api.DataSourcePreviewRequest(
+        limit=10,
+        resource_key="public.orders",
+        dataset_id="dataset-1",
+    )
+    result = await data_source_api.preview_data_source(
+        "source-db-1",
+        body,
+        authorization="Bearer token",
+    )
+
+    assert result.rows == [{"id": 1}]
+    assert captured["kwargs"]["resource_key"] == "public.orders"
+    assert captured["kwargs"]["dataset_id"] == "dataset-1"
+
+
+@pytest.mark.anyio
+async def test_dataset_detail_api_forwards_to_mcp_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_detail(*args: object, **kwargs: object) -> dict[str, object]:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {
+            "success": True,
+            "source_id": "source-db-1",
+            "resource_key": "public.orders",
+            "dataset": {"id": "dataset-1"},
+            "field_groups": [],
+            "preview_sample": {"rows": [{"id": 1}]},
+            "rows": [{"id": 1}],
+            "sample_limit": 10,
+            "row_count": 1,
+            "message": "已获取数据集详情",
+        }
+
+    monkeypatch.setattr(data_source_api, "data_source_get_dataset_detail", fake_detail)
+
+    result = await data_source_api.get_dataset_detail(
+        "source-db-1",
+        "dataset-1",
+        resource_key="public.orders",
+        sample_limit=10,
+        refresh=False,
+        authorization="Bearer token",
+    )
+
+    assert result.rows == [{"id": 1}]
+    assert result.preview_sample == {"rows": [{"id": 1}]}
+    assert captured["kwargs"]["resource_key"] == "public.orders"
+    assert captured["kwargs"]["sample_limit"] == 10
+
+
+@pytest.mark.anyio
+async def test_mcp_client_preview_forwards_resource_key_and_dataset_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_call_mcp_tool(tool_name: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["tool_name"] = tool_name
+        captured["payload"] = payload
+        return {"success": True, "rows": []}
+
+    monkeypatch.setattr(mcp_client, "call_mcp_tool", fake_call_mcp_tool)
+
+    result = await mcp_client.data_source_preview(
+        "token",
+        "source-db-1",
+        resource_key="public.orders",
+        dataset_id="dataset-1",
+        limit=10,
+    )
+
+    assert result["success"] is True
+    assert captured["tool_name"] == "data_source_preview"
+    assert captured["payload"]["resource_key"] == "public.orders"
+    assert captured["payload"]["dataset_id"] == "dataset-1"

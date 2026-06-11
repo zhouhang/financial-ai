@@ -4121,6 +4121,7 @@ async def data_source_preview(
     limit: int = 20,
     mode: str = "",
     resource_key: str = "",
+    dataset_id: str = "",
 ) -> dict[str, Any]:
     if not auth_token:
         return {"success": False, "error": "未提供认证 token，请先登录"}
@@ -4131,7 +4132,7 @@ async def data_source_preview(
     if normalized_mode == "mock":
         return _mock_preview_data_source(auth_token, source_id, limit=limit)
 
-    payload = {
+    payload: dict[str, Any] = {
         "auth_token": auth_token,
         "source_id": source_id,
         "limit": max(1, min(limit, 100)),
@@ -4139,9 +4140,41 @@ async def data_source_preview(
     }
     if resource_key:
         payload["resource_key"] = resource_key
+    if dataset_id:
+        payload["dataset_id"] = dataset_id
     result = await call_mcp_tool("data_source_preview", payload)
     if not result.get("success") and _is_unknown_tool_error(result.get("error")):
         return _mock_preview_data_source(auth_token, source_id, limit=limit)
+    return _attach_mode(result, normalized_mode)
+
+
+async def data_source_get_dataset_detail(
+    auth_token: str,
+    source_id: str,
+    *,
+    dataset_id: str = "",
+    resource_key: str = "",
+    sample_limit: int = 10,
+    refresh: bool = False,
+    mode: str = "",
+) -> dict[str, Any]:
+    if not auth_token:
+        return {"success": False, "error": "未提供认证 token，请先登录"}
+    if not source_id:
+        return {"success": False, "error": "source_id 不能为空"}
+    normalized_mode = "mock" if _is_mock_source_id(source_id) else _normalize_mode(mode, default_mode=_DATA_SOURCE_CONNECTION_MODE)
+    payload: dict[str, Any] = {
+        "auth_token": auth_token,
+        "source_id": source_id,
+        "sample_limit": max(1, min(sample_limit, 50)),
+        "refresh": bool(refresh),
+        "mode": normalized_mode,
+    }
+    if dataset_id:
+        payload["dataset_id"] = dataset_id
+    if resource_key:
+        payload["resource_key"] = resource_key
+    result = await call_mcp_tool("data_source_get_dataset_detail", payload)
     return _attach_mode(result, normalized_mode)
 
 
