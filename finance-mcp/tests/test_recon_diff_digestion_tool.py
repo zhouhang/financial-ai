@@ -246,6 +246,8 @@ class TestApplyDiffDigestionResults:
 
         assert run_row["review_round"] == 1
         assert run_row["last_resolved_at"] is not None
+        # anomaly_count 必须同步更新为剩余 open 差异数(前端看板读此列)
+        assert run_row["anomaly_count"] == 2  # target_only(1) + matched_with_diff(1)
         resolution = run_row["resolution_summary_json"]
         assert resolution["resolved"] == 1
         assert resolution["reclassified"] == 1
@@ -320,6 +322,8 @@ class TestApplyDiffDigestionResults:
         assert summary["matched_exact"] == _INITIAL_SUMMARY["matched_exact"]
         assert summary["total_records"] == _INITIAL_SUMMARY["total_records"]
         assert run_row["review_round"] == 2
+        # 全 resolved 后 anomaly_count 必须归零
+        assert run_row["anomaly_count"] == 0
         resolution = run_row["resolution_summary_json"]
         assert resolution["digestion_meta"] == {"fetch_degraded": True}
 

@@ -11404,6 +11404,7 @@ def apply_diff_digestion_results(
                         resolution_summary_json = %s::jsonb,
                         review_round = %s,
                         last_resolved_at = CURRENT_TIMESTAMP,
+                        anomaly_count = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                     """,
@@ -11411,6 +11412,7 @@ def apply_diff_digestion_results(
                         psycopg2.extras.Json(summary_patch),
                         psycopg2.extras.Json(resolution_summary),
                         review_round,
+                        total_open,
                         run_id,
                     ),
                 )
