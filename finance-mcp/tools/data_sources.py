@@ -9669,7 +9669,13 @@ async def _handle_data_source_get_dataset_detail(arguments: dict[str, Any]) -> d
     if not dataset_id and not dataset_code and not resource_key:
         return {"success": False, "error": "缺少数据集标识"}
 
-    dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
+    if dataset_id:
+        dataset_row = auth_db.get_unified_data_source_dataset_by_id(
+            company_id=company_id,
+            dataset_id=dataset_id,
+        )
+    else:
+        dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
     if not dataset_row:
         return {"success": False, "error": "数据集不存在"}
     if _safe_text(dataset_row.get("data_source_id")) and _safe_text(dataset_row.get("data_source_id")) != source_id:

@@ -155,6 +155,32 @@ async def test_dataset_detail_requires_dataset_identifier(monkeypatch):
     assert "数据集标识" in result["error"]
 
 
+@pytest.mark.anyio
+async def test_dataset_detail_missing_dataset_id_does_not_fall_back(monkeypatch):
+    def fail_list_fallback(**kwargs):
+        raise AssertionError("missing dataset_id must not fall back to dataset list")
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(data_sources.auth_db, "get_unified_data_source_by_id", lambda **kwargs: _source())
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: None,
+    )
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_data_source_datasets", fail_list_fallback)
+
+    result = await data_sources._handle_data_source_get_dataset_detail(
+        {
+            "auth_token": "token",
+            "source_id": "source-db-1",
+            "dataset_id": "missing-dataset",
+        }
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "数据集不存在"
+
+
 def test_dataset_detail_tool_is_registered_and_routed():
     tool_names = {tool.name for tool in data_sources.create_tools()}
     assert "data_source_get_dataset_detail" in tool_names
