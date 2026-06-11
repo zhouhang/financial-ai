@@ -10537,7 +10537,8 @@ def get_execution_run(*, company_id: str, run_id: str | None = None, run_code: s
                                failed_stage, failed_reason,
                                run_context_json, source_snapshot_json, subtasks_json,
                                proc_result_json, recon_result_summary_json, artifacts_json,
-                               anomaly_count, started_at, finished_at, created_at, updated_at
+                               anomaly_count, review_round, last_resolved_at, resolution_summary_json,
+                               started_at, finished_at, created_at, updated_at
                         FROM execution_runs
                         WHERE company_id = %s
                           AND id = %s
@@ -10553,7 +10554,8 @@ def get_execution_run(*, company_id: str, run_id: str | None = None, run_code: s
                                failed_stage, failed_reason,
                                run_context_json, source_snapshot_json, subtasks_json,
                                proc_result_json, recon_result_summary_json, artifacts_json,
-                               anomaly_count, started_at, finished_at, created_at, updated_at
+                               anomaly_count, review_round, last_resolved_at, resolution_summary_json,
+                               started_at, finished_at, created_at, updated_at
                         FROM execution_runs
                         WHERE company_id = %s
                           AND run_code = %s
@@ -10566,6 +10568,61 @@ def get_execution_run(*, company_id: str, run_id: str | None = None, run_code: s
     except Exception as e:
         logger.error(f"查询 execution_runs 失败 (company_id={company_id}, run_id={run_id}, run_code={run_code}): {e}")
         return None
+
+
+def get_execution_run_by_id(*, run_id: str) -> dict | None:
+    """按 id 跨公司查询执行记录(worker/调度器内部调用,入参只有 run_id)。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, company_id, run_code, scheme_code, plan_code, scheme_type,
+                           trigger_type, entry_mode, execution_status,
+                           failed_stage, failed_reason,
+                           run_context_json, source_snapshot_json, subtasks_json,
+                           proc_result_json, recon_result_summary_json, artifacts_json,
+                           anomaly_count, review_round, last_resolved_at, resolution_summary_json,
+                           started_at, finished_at, created_at, updated_at
+                    FROM execution_runs
+                    WHERE id = %s
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"按 id 查询 execution_runs 失败 (run_id={run_id}): {e}")
+        return None
+
+
+def list_open_execution_run_exceptions(*, run_id: str) -> list[dict]:
+    """读该 run 全量未关闭异常(差异消化工作清单,不分页)。
+
+    依赖索引 idx_run_exceptions_run_open (run_id, is_closed)。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, anomaly_key, anomaly_type, detail_json, review_round
+                    FROM execution_run_exceptions
+                    WHERE run_id = %s
+                      AND is_closed = FALSE
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (run_id,),
+                )
+                rows = cur.fetchall()
+                return [_normalize_record(dict(row)) for row in rows]
+    except Exception as e:
+        # 不吞错返回 []:空列表会被消化工具当成"无未关闭差异"短路,掩盖查询失败
+        logger.error(f"查询未关闭 execution_run_exceptions 失败 (run_id={run_id}): {e}")
+        raise
 
 
 def list_execution_runs(
@@ -10588,7 +10645,8 @@ def list_execution_runs(
                            runs.failed_stage, runs.failed_reason,
                            runs.run_context_json, runs.source_snapshot_json, runs.subtasks_json,
                            runs.proc_result_json, runs.recon_result_summary_json, runs.artifacts_json,
-                           runs.anomaly_count, runs.started_at, runs.finished_at,
+                           runs.anomaly_count, runs.review_round, runs.last_resolved_at,
+                           runs.resolution_summary_json, runs.started_at, runs.finished_at,
                            runs.created_at, runs.updated_at,
                            plan.plan_name,
                            scheme.scheme_name

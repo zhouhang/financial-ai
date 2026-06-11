@@ -666,6 +666,21 @@ def create_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="recon_diff_digestion",
+            description=(
+                "差异消化:对历史对账 run 的未关闭异常,用当前全量两侧数据重判,"
+                "resolved 关闭/reclassified 改类型/kept +轮次,并原地更新该 run 的 summary。"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "worker_token": {"type": "string"},
+                    "run_id": {"type": "string"},
+                },
+                "required": ["worker_token", "run_id"],
+            },
+        ),
+        Tool(
             name="execution_proc_draft_trial",
             description="proc 草稿试跑（规则结构校验 + steps 运行验证，不落库）。",
             inputSchema={
@@ -799,6 +814,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _exception_bulk_update_by_owner(arguments)
         if name == "execution_run_exception_list_pending_todo_batches":
             return _scheduler_list_pending_todo_batches(arguments)
+        if name == "recon_diff_digestion":
+            return _handle_recon_diff_digestion(arguments)
         if name == "execution_proc_draft_trial":
             return _proc_draft_trial(arguments)
         if name == "execution_recon_draft_trial":
@@ -3190,6 +3207,157 @@ def _scheduler_list_pending_todo_batches(arguments: dict[str, Any]) -> dict[str,
         max_age_days=max(1, max_age_days),
     )
     return {"success": True, "count": len(batches), "batches": batches}
+
+
+def _digestion_key_mappings(key_columns_config: dict[str, Any]) -> list[dict[str, str]]:
+    """解析 recon 规则 key_columns 的 join key 映射(与 recon_tool._get_key_mappings 同语义)。"""
+    normalized: list[dict[str, str]] = []
+    for item in _safe_list(key_columns_config.get("mappings")):
+        mapping = _safe_dict(item)
+        source_field = _as_text(mapping.get("source_field"))
+        target_field = _as_text(mapping.get("target_field"))
+        if source_field and target_field:
+            normalized.append({"source_field": source_field, "target_field": target_field})
+    if normalized:
+        return normalized
+    source_field = _as_text(key_columns_config.get("source_field"))
+    target_field = _as_text(key_columns_config.get("target_field"))
+    if source_field and target_field:
+        return [{"source_field": source_field, "target_field": target_field}]
+    return []
+
+
+def _exception_to_open_diff(row: dict[str, Any], source_key_field: str) -> dict[str, Any]:
+    """exception 行 → digest_diffs 的 open_diff 条目。
+
+    key 值回退链(按真实 detail_json 结构,join_key 在顶层):
+    join_key[0].source_value → join_key[0].target_value → 顶层 anomaly_key。
+    """
+    detail = row.get("detail_json")
+    if isinstance(detail, str):
+        import json
+
+        try:
+            detail = json.loads(detail)
+        except (TypeError, ValueError):
+            detail = {}
+    detail = _safe_dict(detail)
+    key_value = ""
+    join_key = [item for item in _safe_list(detail.get("join_key")) if isinstance(item, dict)]
+    if join_key:
+        key_value = _as_text(join_key[0].get("source_value")) or _as_text(
+            join_key[0].get("target_value")
+        )
+    if not key_value:
+        key_value = _as_text(row.get("anomaly_key"))
+    return {
+        "exception_id": str(row.get("id") or ""),
+        "anomaly_type": _as_text(row.get("anomaly_type")),
+        "key": {source_key_field: key_value},
+    }
+
+
+def _handle_recon_diff_digestion(arguments: dict[str, Any]) -> dict[str, Any]:
+    """差异消化编排:取 run/规则 → open exceptions → 全量两侧 frame → 重判 → 单事务回写。"""
+    _require_scheduler_user(arguments.get("worker_token", ""))
+    run_id = _as_text(arguments.get("run_id"))
+    if not run_id:
+        return {"success": False, "error": "run_id 不能为空"}
+
+    run = auth_db.get_execution_run_by_id(run_id=run_id)
+    if not run:
+        return {"success": False, "error": "run_id 对应执行记录不存在"}
+    company_id = str(run.get("company_id") or "")
+    scheme_code = _as_text(run.get("scheme_code"))
+    scheme = auth_db.get_execution_scheme(company_id=company_id, scheme_code=scheme_code)
+    if not scheme:
+        return {"success": False, "error": f"run 关联方案不存在 (scheme_code={scheme_code})"}
+    proc_rule_code = _as_text(scheme.get("proc_rule_code"))
+    recon_rule_code = _as_text(scheme.get("recon_rule_code"))
+    if not proc_rule_code or not recon_rule_code:
+        return {"success": False, "error": "方案缺少 proc_rule_code 或 recon_rule_code,无法差异消化"}
+
+    from tools.rules import get_rule
+
+    proc_rule_row = get_rule(proc_rule_code)
+    if not proc_rule_row or not isinstance(proc_rule_row.get("rule"), dict):
+        return {"success": False, "error": f"proc 规则不存在或格式无效 (rule_code={proc_rule_code})"}
+    recon_rule_row = get_rule(recon_rule_code)
+    if not recon_rule_row or not isinstance(recon_rule_row.get("rule"), dict):
+        return {"success": False, "error": f"recon 规则不存在或格式无效 (rule_code={recon_rule_code})"}
+    proc_rule_json = proc_rule_row["rule"]
+    recon_rule = recon_rule_row["rule"]
+    rules = [item for item in _safe_list(recon_rule.get("rules")) if isinstance(item, dict)]
+    recon_config = _safe_dict((rules[0] if rules else {}).get("recon"))
+    key_columns_config = _safe_dict(recon_config.get("key_columns"))
+    key_mappings = _digestion_key_mappings(key_columns_config)
+    if not key_mappings:
+        return {"success": False, "error": f"recon 规则缺少 join key 配置 (rule_code={recon_rule_code})"}
+    compare_columns_config = [
+        item
+        for item in _safe_list(_safe_dict(recon_config.get("compare_columns")).get("columns"))
+        if isinstance(item, dict)
+    ]
+    source_key_field = key_mappings[0]["source_field"]
+    target_key_field = key_mappings[0]["target_field"]
+
+    open_rows = auth_db.list_open_execution_run_exceptions(run_id=run_id)
+    if not open_rows:
+        return {
+            "success": True,
+            "resolved": 0,
+            "reclassified": 0,
+            "kept": 0,
+            "message": "无未关闭差异",
+        }
+    open_diffs = [_exception_to_open_diff(row, source_key_field) for row in open_rows]
+    diff_keys = {
+        str(diff["key"].get(source_key_field) or "").strip()
+        for diff in open_diffs
+        if str(diff["key"].get(source_key_field) or "").strip()
+    }
+
+    from recon.mcp_server import diff_digestion
+
+    left_df, right_df, meta = diff_digestion.build_full_recon_frames(
+        run=run,
+        proc_rule_code=proc_rule_code,
+        proc_rule_json=proc_rule_json,
+        diff_keys=diff_keys,
+        left_key_field=source_key_field,
+        right_key_field=target_key_field,
+    )
+    try:
+        results = diff_digestion.digest_diffs(
+            open_diffs=open_diffs,
+            source_df=left_df,
+            target_df=right_df,
+            key_mappings=key_mappings,
+            compare_columns_config=compare_columns_config,
+            rule_id=recon_rule_code,
+            key_columns_config=key_columns_config,
+        )
+    except ValueError as exc:
+        # digest_diffs 的支持范围守卫(复合 key / transformations):宁可整轮报错,不可错判
+        logger.warning("[recon][diff_digestion] run %s 重判被守卫拦截: %s", run_id, exc)
+        return {"success": False, "error": str(exc)}
+
+    review_round = int(run.get("review_round") or 0) + 1
+    writeback = auth_db.apply_diff_digestion_results(
+        run_id=run_id,
+        results=results,
+        review_round=review_round,
+        digestion_meta=meta,
+    )
+    return {
+        "success": True,
+        "resolved": writeback["resolved"],
+        "reclassified": writeback["reclassified"],
+        "kept": writeback["kept"],
+        "open_counts": writeback["open_counts"],
+        "review_round": review_round,
+        "fetch_degraded": bool(meta.get("fetch_degraded")),
+    }
 
 
 def _validate_proc_source_tables(rule_json: dict[str, Any]) -> list[dict[str, Any]]:

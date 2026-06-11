@@ -352,6 +352,7 @@ _EXECUTION_TOOL_NAMES = {
     "execution_run_exception_update",
     "execution_run_exception_bulk_update_by_owner",
     "execution_run_exception_list_pending_todo_batches",
+    "recon_diff_digestion",
     "execution_proc_draft_trial",
     "execution_recon_draft_trial",
     "execution_proc_rule_compatibility_check",

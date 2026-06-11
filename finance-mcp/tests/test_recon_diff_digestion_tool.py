@@ -329,6 +329,17 @@ class TestApplyDiffDigestionResults:
             assert row["fix_status"] == "resolved_by_digestion"
             assert row["review_round"] == 2
 
+    def test_run_get_exposes_digestion_fields(self, digestion_run) -> None:
+        """前端轮询靠 review_round 变化判断完成,run 查询白名单必须透出新字段。"""
+        run = auth_db.get_execution_run(company_id=COMPANY_ID, run_id=digestion_run["run_id"])
+        assert run is not None
+        for field in ("review_round", "last_resolved_at", "resolution_summary_json"):
+            assert field in run, f"get_execution_run 缺少字段 {field}"
+        runs = auth_db.list_execution_runs(company_id=COMPANY_ID, scheme_code=run["scheme_code"])
+        assert runs, "list_execution_runs 未返回测试 run"
+        for field in ("review_round", "last_resolved_at", "resolution_summary_json"):
+            assert field in runs[0], f"list_execution_runs 缺少字段 {field}"
+
     def test_unknown_exception_id_rolls_back_whole_batch(self, digestion_run) -> None:
         """单事务:任一条回写未命中 → 整批回滚,不留半套状态。"""
         run_id = digestion_run["run_id"]
@@ -357,3 +368,348 @@ class TestApplyDiffDigestionResults:
         run_row = _fetch_run(run_id)
         assert run_row["review_round"] == 0
         assert run_row["recon_result_summary_json"]["source_only"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 提交 2:recon_diff_digestion MCP 工具编排
+# ---------------------------------------------------------------------------
+
+RECON_RULE_JSON = {
+    "rule_id": "rule-digestion",
+    "rules": [
+        {
+            "rule_id": "rule-digestion",
+            "recon": {
+                "key_columns": {
+                    "mappings": [{"source_field": "订单编号", "target_field": "订单号"}],
+                    "source_field": "订单编号",
+                    "target_field": "订单号",
+                    "transformations": {},
+                },
+                "compare_columns": {
+                    "columns": [
+                        {"source_field": "买家实付金额", "target_field": "订单实际金额（元）"}
+                    ]
+                },
+            },
+        }
+    ],
+}
+
+PROC_RULE_JSON = {"steps": []}
+
+
+def _create_rule(rule_code: str, rule_json: dict, rule_type: str) -> None:
+    with auth_db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO rule_detail (id, rule_code, rule, rule_type, name)
+                VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM rule_detail), %s, %s::jsonb, %s, %s)
+                """,
+                (rule_code, psycopg2.extras.Json(rule_json), rule_type, f"消化测试规则 {rule_code}"),
+            )
+        conn.commit()
+
+
+def _delete_rule(rule_code: str) -> None:
+    with auth_db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM rule_detail WHERE rule_code = %s", (rule_code,))
+        conn.commit()
+
+
+def _create_scheme(scheme_code: str, proc_rule_code: str, recon_rule_code: str) -> None:
+    with auth_db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO execution_schemes (
+                    company_id, scheme_code, scheme_name, scheme_type,
+                    proc_rule_code, recon_rule_code
+                ) VALUES (%s, %s, %s, 'recon', %s, %s)
+                """,
+                (COMPANY_ID, scheme_code, f"消化测试方案 {scheme_code}", proc_rule_code, recon_rule_code),
+            )
+        conn.commit()
+
+
+def _delete_scheme(scheme_code: str) -> None:
+    with auth_db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM execution_schemes WHERE company_id = %s AND scheme_code = %s",
+                (COMPANY_ID, scheme_code),
+            )
+        conn.commit()
+
+
+@pytest.fixture
+def digestion_tool_setup():
+    """run + scheme + proc/recon rule + 3 条 open exceptions(覆盖 key 回退链)。"""
+    suffix = uuid.uuid4().hex[:8]
+    scheme_code = f"scheme-dd-{suffix}"
+    proc_rule_code = f"dataset_proc_dd_{suffix}"
+    recon_rule_code = f"dataset_recon_dd_{suffix}"
+    _create_rule(proc_rule_code, PROC_RULE_JSON, "data_process")
+    _create_rule(recon_rule_code, RECON_RULE_JSON, "recon")
+    _create_scheme(scheme_code, proc_rule_code, recon_rule_code)
+    run_id = _create_run(scheme_code=scheme_code)
+    # e1: join_key[0].source_value 直取
+    exc_source = _create_exception(
+        run_id,
+        anomaly_key="A1",
+        anomaly_type="source_only",
+        scheme_code=scheme_code,
+        detail_json={
+            "join_key": [
+                {
+                    "source_field": "订单编号",
+                    "source_value": "A1",
+                    "target_field": "订单号",
+                    "target_value": None,
+                }
+            ]
+        },
+    )
+    # e2: source_value 为空 → 回退 target_value(target_only 真实形态)
+    exc_target = _create_exception(
+        run_id,
+        anomaly_key="B2-anomaly-key",
+        anomaly_type="target_only",
+        scheme_code=scheme_code,
+        detail_json={
+            "join_key": [
+                {
+                    "source_field": "订单编号",
+                    "source_value": None,
+                    "target_field": "订单号",
+                    "target_value": "B2",
+                }
+            ]
+        },
+    )
+    # e3: join_key 缺失 → 回退顶层 anomaly_key
+    exc_fallback = _create_exception(
+        run_id,
+        anomaly_key="C3",
+        anomaly_type="matched_with_diff",
+        scheme_code=scheme_code,
+        detail_json={"join_key": []},
+    )
+    try:
+        yield {
+            "run_id": run_id,
+            "scheme_code": scheme_code,
+            "proc_rule_code": proc_rule_code,
+            "recon_rule_code": recon_rule_code,
+            "exc_source": exc_source,
+            "exc_target": exc_target,
+            "exc_fallback": exc_fallback,
+        }
+    finally:
+        _delete_run(run_id)
+        _delete_scheme(scheme_code)
+        _delete_rule(proc_rule_code)
+        _delete_rule(recon_rule_code)
+
+
+def _import_tool_modules():
+    from recon.mcp_server import diff_digestion
+    from tools import execution_runs
+
+    return execution_runs, diff_digestion
+
+
+def _bypass_worker_auth(monkeypatch, execution_runs_module) -> None:
+    monkeypatch.setattr(
+        execution_runs_module,
+        "_require_scheduler_user",
+        lambda token: {"id": "worker-1", "role": "scheduler"},
+    )
+
+
+class TestReconDiffDigestionTool:
+    def test_tool_registered_and_routable(self) -> None:
+        execution_runs, _ = _import_tool_modules()
+        tools = {tool.name: tool for tool in execution_runs.create_tools()}
+        assert "recon_diff_digestion" in tools, "recon_diff_digestion 工具未注册"
+        schema = tools["recon_diff_digestion"].inputSchema
+        assert set(schema.get("required") or []) == {"worker_token", "run_id"}
+
+        import unified_mcp_server
+
+        assert "recon_diff_digestion" in unified_mcp_server._EXECUTION_TOOL_NAMES, (
+            "recon_diff_digestion 未加入 _EXECUTION_TOOL_NAMES,unified 路由不到"
+        )
+
+    @pytest.mark.asyncio
+    async def test_orchestration_happy_path(self, monkeypatch, digestion_tool_setup) -> None:
+        execution_runs, diff_digestion = _import_tool_modules()
+        _bypass_worker_auth(monkeypatch, execution_runs)
+        setup = digestion_tool_setup
+        captured: dict[str, Any] = {}
+
+        import pandas as pd
+
+        meta = {
+            "fetch_degraded": False,
+            "fallback_full_fetch_sides": [],
+            "failed_batches": 0,
+            "dedup_mode": "keep_latest",
+        }
+
+        def fake_build_full_recon_frames(**kwargs):
+            captured["build_kwargs"] = kwargs
+            return pd.DataFrame(), pd.DataFrame(), dict(meta)
+
+        def fake_digest_diffs(**kwargs):
+            captured["digest_kwargs"] = kwargs
+            by_id = {
+                setup["exc_source"]: ("resolved", "matched", "matched"),
+                setup["exc_target"]: ("reclassified", "source_only", "source_only"),
+                setup["exc_fallback"]: ("kept", "matched_with_diff", None),
+            }
+            results = []
+            for diff in kwargs["open_diffs"]:
+                outcome, new_type, resolved_to = by_id[diff["exception_id"]]
+                entry = {**diff, "outcome": outcome, "new_type": new_type}
+                if resolved_to is not None:
+                    entry["resolved_to"] = resolved_to
+                results.append(entry)
+            return results
+
+        monkeypatch.setattr(diff_digestion, "build_full_recon_frames", fake_build_full_recon_frames)
+        monkeypatch.setattr(diff_digestion, "digest_diffs", fake_digest_diffs)
+
+        result = await execution_runs.handle_tool_call(
+            "recon_diff_digestion",
+            {"worker_token": "worker-token", "run_id": setup["run_id"]},
+        )
+
+        assert result.get("success") is True, f"工具应成功,实际: {result}"
+        assert result["resolved"] == 1
+        assert result["reclassified"] == 1
+        assert result["kept"] == 1
+        assert result["fetch_degraded"] is False
+        assert result["open_counts"]["source_only"] == 1  # exc_target 被改判 source_only
+        assert result["open_counts"]["matched_with_diff"] == 1
+
+        # exceptions → open_diffs 转换(含 key 回退链)
+        open_diffs = captured["digest_kwargs"]["open_diffs"]
+        by_id = {diff["exception_id"]: diff for diff in open_diffs}
+        assert by_id[setup["exc_source"]]["anomaly_type"] == "source_only"
+        assert by_id[setup["exc_source"]]["key"] == {"订单编号": "A1"}
+        assert by_id[setup["exc_target"]]["key"] == {"订单编号": "B2"}
+        assert by_id[setup["exc_fallback"]]["key"] == {"订单编号": "C3"}
+
+        # build_full_recon_frames 入参
+        build_kwargs = captured["build_kwargs"]
+        assert build_kwargs["proc_rule_code"] == setup["proc_rule_code"]
+        assert build_kwargs["proc_rule_json"] == PROC_RULE_JSON
+        assert build_kwargs["diff_keys"] == {"A1", "B2", "C3"}
+        assert build_kwargs["left_key_field"] == "订单编号"
+        assert build_kwargs["right_key_field"] == "订单号"
+        assert str(build_kwargs["run"]["id"]) == setup["run_id"]
+
+        # digest_diffs 入参取自 recon 规则
+        digest_kwargs = captured["digest_kwargs"]
+        assert digest_kwargs["key_mappings"] == [
+            {"source_field": "订单编号", "target_field": "订单号"}
+        ]
+        assert digest_kwargs["compare_columns_config"] == (
+            RECON_RULE_JSON["rules"][0]["recon"]["compare_columns"]["columns"]
+        )
+        assert digest_kwargs["key_columns_config"] == (
+            RECON_RULE_JSON["rules"][0]["recon"]["key_columns"]
+        )
+        assert digest_kwargs["rule_id"] == setup["recon_rule_code"]
+
+        # 回写落库(review_round=run.review_round+1=1)
+        resolved_row = _fetch_exception(setup["exc_source"])
+        assert resolved_row["is_closed"] is True
+        assert resolved_row["fix_status"] == "resolved_by_digestion"
+        assert resolved_row["review_round"] == 1
+        run_row = _fetch_run(setup["run_id"])
+        assert run_row["review_round"] == 1
+        assert result.get("review_round") == 1
+
+    @pytest.mark.asyncio
+    async def test_digest_value_error_becomes_failure(
+        self, monkeypatch, digestion_tool_setup
+    ) -> None:
+        """digest_diffs 的守卫 ValueError 必须转 success:False,不得吞掉、不得回写。"""
+        execution_runs, diff_digestion = _import_tool_modules()
+        _bypass_worker_auth(monkeypatch, execution_runs)
+        setup = digestion_tool_setup
+
+        import pandas as pd
+
+        monkeypatch.setattr(
+            diff_digestion,
+            "build_full_recon_frames",
+            lambda **kwargs: (pd.DataFrame(), pd.DataFrame(), {"fetch_degraded": False}),
+        )
+
+        def raising_digest(**kwargs):
+            raise ValueError("差异消化暂不支持复合 join key 规则(key_mappings>1)")
+
+        monkeypatch.setattr(diff_digestion, "digest_diffs", raising_digest)
+
+        result = await execution_runs.handle_tool_call(
+            "recon_diff_digestion",
+            {"worker_token": "worker-token", "run_id": setup["run_id"]},
+        )
+
+        assert result.get("success") is False
+        assert "复合 join key" in str(result.get("error") or "")
+        # 不应有任何回写
+        row = _fetch_exception(setup["exc_source"])
+        assert row["is_closed"] is False
+        assert row["review_round"] == 0
+        assert _fetch_run(setup["run_id"])["review_round"] == 0
+
+    @pytest.mark.asyncio
+    async def test_no_open_exceptions_short_circuit(self, monkeypatch) -> None:
+        execution_runs, diff_digestion = _import_tool_modules()
+        _bypass_worker_auth(monkeypatch, execution_runs)
+        suffix = uuid.uuid4().hex[:8]
+        scheme_code = f"scheme-dd-{suffix}"
+        proc_rule_code = f"dataset_proc_dd_{suffix}"
+        recon_rule_code = f"dataset_recon_dd_{suffix}"
+        _create_rule(proc_rule_code, PROC_RULE_JSON, "data_process")
+        _create_rule(recon_rule_code, RECON_RULE_JSON, "recon")
+        _create_scheme(scheme_code, proc_rule_code, recon_rule_code)
+        run_id = _create_run(scheme_code=scheme_code)
+
+        def must_not_call(**kwargs):
+            raise AssertionError("open=0 时不应取数/重判")
+
+        monkeypatch.setattr(diff_digestion, "build_full_recon_frames", must_not_call)
+        monkeypatch.setattr(diff_digestion, "digest_diffs", must_not_call)
+        try:
+            result = await execution_runs.handle_tool_call(
+                "recon_diff_digestion",
+                {"worker_token": "worker-token", "run_id": run_id},
+            )
+        finally:
+            _delete_run(run_id)
+            _delete_scheme(scheme_code)
+            _delete_rule(proc_rule_code)
+            _delete_rule(recon_rule_code)
+
+        assert result.get("success") is True
+        assert result["resolved"] == 0
+        assert result["reclassified"] == 0
+        assert result["kept"] == 0
+        assert "无未关闭差异" in str(result.get("message") or "")
+
+    @pytest.mark.asyncio
+    async def test_missing_run_id_fails(self, monkeypatch) -> None:
+        execution_runs, _ = _import_tool_modules()
+        _bypass_worker_auth(monkeypatch, execution_runs)
+        result = await execution_runs.handle_tool_call(
+            "recon_diff_digestion", {"worker_token": "worker-token"}
+        )
+        assert result.get("success") is False
+        assert "run_id" in str(result.get("error") or "")
