@@ -55,18 +55,14 @@ def test_preview_orders_by_configured_date_field(monkeypatch):
             "resource_key": "public.orders",
             "limit": 10,
             "dataset": {
-                "schema_summary": {
-                    "fields": [
-                        {"name": "id", "type": "integer"},
-                        {"name": "updated_at", "type": "timestamp"},
-                    ]
-                },
+                "schema_summary": {"fields": ["id", "updated_at"]},
                 "collection_config": {"date_field": "updated_at"},
             },
         }
     )
 
     assert result["success"] is True
+    assert result["rows"] == [{"id": 2, "updated_at": "2026-06-11"}]
     assert result["preview_order"] == {
         "order": "date_field_desc",
         "order_field": "updated_at",

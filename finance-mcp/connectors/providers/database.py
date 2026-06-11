@@ -194,8 +194,12 @@ def _iter_schema_field_names(dataset: dict[str, Any]) -> Iterator[str]:
             for item in value:
                 if isinstance(item, dict):
                     name = str(item.get("name") or item.get("raw_name") or item.get("column_name") or "").strip()
-                    if name:
-                        yield name
+                elif item is None:
+                    continue
+                else:
+                    name = str(item).strip()
+                if name:
+                    yield name
 
 
 def _resolve_preview_order_field(dataset: dict[str, Any]) -> tuple[str, dict[str, str]]:
