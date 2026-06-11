@@ -161,11 +161,11 @@ def _parse_requested_objects(resource_keys: list[str]) -> list[dict[str, str]]:
 def _build_sync_strategy(columns: list[dict[str, Any]]) -> dict[str, Any]:
     cursor_candidates = {
         "updated_at",
+        "updated_time",
         "modified_at",
         "last_updated_at",
         "update_time",
         "modified_time",
-        "updated_time",
     }
     for item in columns:
         column_name = str(item.get("name") or "").strip().lower()
@@ -176,6 +176,7 @@ def _build_sync_strategy(columns: list[dict[str, Any]]) -> dict[str, Any]:
 
 _PREVIEW_DATE_FIELD_CANDIDATES = (
     "updated_at",
+    "updated_time",
     "update_time",
     "modified_at",
     "modified_time",
@@ -206,17 +207,20 @@ def _resolve_preview_order_field(dataset: dict[str, Any]) -> tuple[str, dict[str
     collection_config = dataset.get("collection_config") if isinstance(dataset.get("collection_config"), dict) else {}
     meta = dataset.get("meta") if isinstance(dataset.get("meta"), dict) else {}
     meta_collection = meta.get("collection_config") if isinstance(meta.get("collection_config"), dict) else {}
-    configured = str(
-        collection_config.get("date_field")
-        or collection_config.get("cursor_field")
-        or meta_collection.get("date_field")
-        or meta_collection.get("cursor_field")
-        or ""
-    ).strip()
+    sync_strategy = dataset.get("sync_strategy") if isinstance(dataset.get("sync_strategy"), dict) else {}
     available = {name.lower(): name for name in _iter_schema_field_names(dataset)}
-    if configured and (not available or configured.lower() in available):
-        field = available.get(configured.lower(), configured)
-        return field, {"order": "date_field_desc", "order_field": field}
+    configured_candidates = (
+        collection_config.get("date_field"),
+        collection_config.get("cursor_field"),
+        meta_collection.get("date_field"),
+        meta_collection.get("cursor_field"),
+        sync_strategy.get("cursor_field"),
+    )
+    for configured in configured_candidates:
+        configured_field = str(configured or "").strip()
+        if configured_field and (not available or configured_field.lower() in available):
+            field = available.get(configured_field.lower(), configured_field)
+            return field, {"order": "date_field_desc", "order_field": field}
     for candidate in _PREVIEW_DATE_FIELD_CANDIDATES:
         if candidate in available:
             return available[candidate], {"order": "date_field_desc", "order_field": available[candidate]}
@@ -1320,13 +1324,16 @@ class DatabaseConnector(BaseDataSourceConnector):
         safe_order = order_field.replace('"', '""')
         order_clause = f' ORDER BY "{safe_order}" DESC' if order_field else ""
         try:
-            with conn.cursor() as cur:
+            cur = conn.cursor()
+            try:
                 cur.execute(
                     f"SELECT * FROM '{safe_table}'{order_clause} LIMIT ?",
                     (limit,),
                 )
                 rows = cur.fetchall() or []
                 return [dict(row) for row in rows]
+            finally:
+                cur.close()
         finally:
             conn.close()
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -73,6 +74,108 @@ def test_preview_orders_by_configured_date_field(monkeypatch):
     assert captured["order_field"] == "updated_at"
 
 
+def test_preview_honors_sync_strategy_cursor_field(monkeypatch):
+    captured: dict[str, object] = {}
+    connector = _connector()
+
+    def fake_preview_postgresql(cfg, schema_name, table_name, limit, order_field=None):
+        captured.update(
+            {
+                "schema_name": schema_name,
+                "table_name": table_name,
+                "limit": limit,
+                "order_field": order_field,
+            }
+        )
+        return [{"id": 2, "updated_time": "2026-06-11"}]
+
+    monkeypatch.setattr(connector, "_preview_postgresql", fake_preview_postgresql)
+
+    result = connector.preview(
+        {
+            "resource_key": "public.orders",
+            "limit": 10,
+            "dataset": {
+                "schema_summary": {"fields": ["id", "event_time"]},
+                "sync_strategy": {"cursor_field": "event_time"},
+            },
+        }
+    )
+
+    assert result["success"] is True
+    assert result["preview_order"] == {
+        "order": "date_field_desc",
+        "order_field": "event_time",
+    }
+    assert captured["order_field"] == "event_time"
+
+
+def test_preview_prefers_updated_time_over_id(monkeypatch):
+    captured: dict[str, object] = {}
+    connector = _connector()
+
+    def fake_preview_postgresql(cfg, schema_name, table_name, limit, order_field=None):
+        captured.update(
+            {
+                "schema_name": schema_name,
+                "table_name": table_name,
+                "limit": limit,
+                "order_field": order_field,
+            }
+        )
+        return [{"id": 2, "updated_time": "2026-06-11"}]
+
+    monkeypatch.setattr(connector, "_preview_postgresql", fake_preview_postgresql)
+
+    result = connector.preview(
+        {
+            "resource_key": "public.orders",
+            "limit": 10,
+            "dataset": {"schema_summary": {"fields": ["id", "updated_time"]}},
+        }
+    )
+
+    assert result["success"] is True
+    assert result["preview_order"] == {
+        "order": "date_field_desc",
+        "order_field": "updated_time",
+    }
+    assert captured["order_field"] == "updated_time"
+
+
+def test_preview_falls_back_to_id(monkeypatch):
+    captured: dict[str, object] = {}
+    connector = _connector()
+
+    def fake_preview_postgresql(cfg, schema_name, table_name, limit, order_field=None):
+        captured.update(
+            {
+                "schema_name": schema_name,
+                "table_name": table_name,
+                "limit": limit,
+                "order_field": order_field,
+            }
+        )
+        return [{"id": 2, "name": "A"}]
+
+    monkeypatch.setattr(connector, "_preview_postgresql", fake_preview_postgresql)
+
+    result = connector.preview(
+        {
+            "resource_key": "public.lookup_values",
+            "limit": 10,
+            "dataset": {"schema_summary": {"fields": ["id", "name"]}},
+        }
+    )
+
+    assert result["success"] is True
+    assert result["preview_order"] == {
+        "order": "primary_key_desc",
+        "order_field": "id",
+    }
+    assert captured["order_field"] == "id"
+
+
 def test_preview_marks_default_order_when_no_sort_field(monkeypatch):
     connector = _connector()
     monkeypatch.setattr(
@@ -94,3 +197,30 @@ def test_preview_marks_default_order_when_no_sort_field(monkeypatch):
         "order": "connector_default",
         "order_field": "",
     }
+
+
+def test_preview_sqlite_orders_descending_by_updated_time(tmp_path: Path):
+    connector = _connector()
+    database_path = tmp_path / "preview.sqlite"
+    conn = sqlite3.connect(database_path)
+    try:
+        conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, updated_time TEXT)")
+        conn.executemany(
+            "INSERT INTO orders (id, updated_time) VALUES (?, ?)",
+            [
+                (1, "2026-06-10"),
+                (2, "2026-06-11"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rows = connector._preview_sqlite(  # noqa: SLF001
+        {"database": str(database_path)},
+        "orders",
+        10,
+        order_field="updated_time",
+    )
+
+    assert [row["id"] for row in rows] == [2, 1]
