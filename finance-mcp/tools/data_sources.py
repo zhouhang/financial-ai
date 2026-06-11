@@ -5597,11 +5597,12 @@ def create_tools() -> list[Tool]:
                     "auth_token": {"type": "string"},
                     **source_id_schema,
                     "dataset_id": {"type": "string"},
+                    "dataset_code": {"type": "string"},
                     "resource_key": {"type": "string"},
                     "sample_limit": {"type": "integer"},
                     "refresh": {"type": "boolean"},
                 },
-                "required": ["auth_token", "source_id", "dataset_id"],
+                "required": ["auth_token", "source_id"],
             },
         ),
         Tool(

@@ -182,6 +182,13 @@ async def test_dataset_detail_missing_dataset_id_does_not_fall_back(monkeypatch)
 
 
 def test_dataset_detail_tool_is_registered_and_routed():
-    tool_names = {tool.name for tool in data_sources.create_tools()}
+    tools = data_sources.create_tools()
+    tool_names = {tool.name for tool in tools}
     assert "data_source_get_dataset_detail" in tool_names
     assert "data_source_get_dataset_detail" in unified_mcp_server._DATA_SOURCE_TOOL_NAMES
+
+    detail_tool = next(tool for tool in tools if tool.name == "data_source_get_dataset_detail")
+    properties = detail_tool.inputSchema["properties"]
+    required = set(detail_tool.inputSchema.get("required") or [])
+    assert {"dataset_id", "dataset_code", "resource_key"} <= set(properties)
+    assert "dataset_id" not in required
