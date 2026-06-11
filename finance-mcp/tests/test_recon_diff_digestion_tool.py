@@ -37,7 +37,12 @@ _INITIAL_SUMMARY = {
 # 造数 / 查数 helpers(真实本地库)
 # ---------------------------------------------------------------------------
 
-def _create_run(*, scheme_code: str = "", summary: dict | None = None) -> str:
+def _create_run(
+    *,
+    scheme_code: str = "",
+    summary: dict | None = None,
+    source_snapshot_json: dict | None = None,
+) -> str:
     scheme_code = scheme_code or f"scheme-digestion-{uuid.uuid4().hex[:8]}"
     with auth_db.get_conn() as conn:
         with conn.cursor() as cur:
@@ -46,8 +51,8 @@ def _create_run(*, scheme_code: str = "", summary: dict | None = None) -> str:
                 INSERT INTO execution_runs (
                     company_id, run_code, scheme_code, scheme_type,
                     trigger_type, entry_mode, execution_status,
-                    recon_result_summary_json, anomaly_count
-                ) VALUES (%s, %s, %s, 'recon', 'manual', 'dataset', 'success', %s::jsonb, 3)
+                    recon_result_summary_json, source_snapshot_json, anomaly_count
+                ) VALUES (%s, %s, %s, 'recon', 'manual', 'dataset', 'success', %s::jsonb, %s::jsonb, 3)
                 RETURNING id
                 """,
                 (
@@ -55,6 +60,7 @@ def _create_run(*, scheme_code: str = "", summary: dict | None = None) -> str:
                     f"run-digestion-{uuid.uuid4().hex[:12]}",
                     scheme_code,
                     psycopg2.extras.Json(summary if summary is not None else _INITIAL_SUMMARY),
+                    psycopg2.extras.Json(source_snapshot_json or {}),
                 ),
             )
             run_id = str(cur.fetchone()[0])
@@ -78,11 +84,41 @@ def _detail_json(key_value: str) -> dict:
     }
 
 
+def _target_only_detail_json(key_value: str) -> dict:
+    return {
+        "join_key": [
+            {
+                "source_field": "订单编号",
+                "source_value": None,
+                "target_field": "订单号",
+                "target_value": key_value,
+            }
+        ],
+        "anomaly_type": "target_only",
+        "raw_record": {
+            "source_订单编号": None,
+            "target_订单号": key_value,
+        },
+        "source_record": {"订单编号": None},
+        "target_record": {"订单号": key_value},
+        "compare_values": [
+            {
+                "name": "买家实付金额 ↔ 订单实际金额（元）",
+                "source_field": "买家实付金额",
+                "source_value": None,
+                "target_field": "订单实际金额（元）",
+                "target_value": "0",
+            }
+        ],
+    }
+
+
 def _create_exception(
     run_id: str,
     *,
     anomaly_key: str,
     anomaly_type: str,
+    summary: str | None = None,
     detail_json: dict | None = None,
     scheme_code: str = "scheme-digestion",
 ) -> str:
@@ -102,7 +138,7 @@ def _create_exception(
                     scheme_code,
                     anomaly_key,
                     anomaly_type,
-                    f"差异 {anomaly_key}",
+                    summary or f"差异 {anomaly_key}",
                     psycopg2.extras.Json(
                         detail_json if detail_json is not None else _detail_json(anomaly_key)
                     ),
@@ -135,7 +171,7 @@ def _fetch_exception(exception_id: str) -> dict:
             cur.execute(
                 """
                 SELECT anomaly_type, is_closed, fix_status,
-                       review_round, resolved_at, resolved_to
+                       review_round, resolved_at, resolved_to, summary, detail_json
                 FROM execution_run_exceptions WHERE id = %s
                 """,
                 (exception_id,),
@@ -259,6 +295,58 @@ class TestApplyDiffDigestionResults:
         }
         assert resolution["digestion_meta"] == meta
         assert resolution.get("at")
+
+    def test_reclassified_exception_updates_display_snapshot(self) -> None:
+        run_id = _create_run(
+            source_snapshot_json={
+                "collections": [
+                    {
+                        "binding": {
+                            "role_code": "left_1",
+                            "input_plan_target_table": "left_recon_ready",
+                            "display_name": "博宽服务专营店-店铺订单",
+                        }
+                    },
+                    {
+                        "binding": {
+                            "role_code": "right_1",
+                            "input_plan_target_table": "right_recon_ready",
+                            "display_name": "博宽服务专营店-收支明细",
+                        }
+                    },
+                ]
+            }
+        )
+        exception_id = _create_exception(
+            run_id,
+            anomaly_key="stale-target-only-key",
+            anomaly_type="target_only",
+            summary="仅 收支明细 存在（店铺订单 缺失）：订单号=3306514334587002794",
+            detail_json=_target_only_detail_json("3306514334587002794"),
+        )
+        try:
+            auth_db.apply_diff_digestion_results(
+                run_id=run_id,
+                results=[
+                    {
+                        "exception_id": exception_id,
+                        "outcome": "reclassified",
+                        "new_type": "matched_with_diff",
+                        "resolved_to": "matched_with_diff",
+                    }
+                ],
+                review_round=1,
+            )
+
+            row = _fetch_exception(exception_id)
+            assert row["anomaly_type"] == "matched_with_diff"
+            assert row["detail_json"]["anomaly_type"] == "matched_with_diff"
+            assert "仅 收支明细 存在" not in row["summary"]
+            assert "博宽服务专营店-店铺订单 与 博宽服务专营店-收支明细" in row["summary"]
+            assert "金额差异" in row["summary"]
+            assert "3306514334587002794" in row["summary"]
+        finally:
+            _delete_run(run_id)
 
     def test_second_round_all_resolved_clears_has_anomaly(self, digestion_run) -> None:
         run_id = digestion_run["run_id"]

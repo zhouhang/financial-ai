@@ -128,6 +128,10 @@ def _side_record_key(side: str) -> str:
     return "source_record" if side == "source" else "target_record"
 
 
+def _has_meaningful_record(record: Any) -> bool:
+    return any(_has_lookup_value(value) for value in _safe_dict(record).values())
+
+
 def _lookup_collection_entry(
     *,
     target_table: str,
@@ -163,6 +167,8 @@ def _lookup_candidates_for_side(
         value = item.get("source_value") if side == "source" else item.get("target_value")
         if not _has_lookup_value(value):
             value = item.get("value")
+        if not _has_lookup_value(value):
+            value = item.get("target_value") if side == "source" else item.get("source_value")
         if not _has_lookup_value(value):
             value = raw_record.get(processed_field)
         if not _has_lookup_value(value):
@@ -298,7 +304,7 @@ def hydrate_execution_exception_details(
         changed = False
         for side in ("source", "target"):
             record_key = _side_record_key(side)
-            if _safe_dict(detail_json.get(record_key)):
+            if _has_meaningful_record(detail_json.get(record_key)):
                 continue
             record = _hydrate_exception_side_record(
                 company_id=company_id,

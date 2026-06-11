@@ -130,3 +130,107 @@ def test_public_exception_bundle_hydrates_legacy_target_only_source_record(monke
     assert detail_json["target_record"]["订单付款时间"] == "2026-05-27 12:00:00"
     assert browser_calls[0]["filters"] == {"订单编号": "5118001236570006333"}
     assert browser_calls[0]["dataset_id"] == "dataset-right"
+
+
+def test_exception_hydration_replaces_empty_side_record(monkeypatch) -> None:
+    run = {
+        "id": "run-1",
+        "company_id": "company-1",
+        "scheme_code": "scheme-1",
+        "run_context_json": {"biz_date": "2026-06-09"},
+        "source_snapshot_json": {
+            "biz_date": "2026-06-09",
+            "collections": [
+                {
+                    "binding": {
+                        "data_source_id": "source-left",
+                        "dataset_id": "dataset-left",
+                        "dataset_code": "sold-orders",
+                        "resource_key": "browser-collection-sold-orders@1",
+                        "source_kind": "browser_playbook",
+                        "dataset_source_type": "browser_collection_records",
+                        "input_plan_target_table": "left_recon_ready",
+                    }
+                }
+            ],
+        },
+    }
+    scheme = {
+        "scheme_meta_json": {
+            "proc_rule_json": {
+                "steps": [
+                    {
+                        "action": "write_dataset",
+                        "target_table": "left_recon_ready",
+                        "sources": [
+                            {
+                                "alias": "source_1",
+                                "table": "browser-collection-sold-orders@1",
+                            }
+                        ],
+                        "mappings": [
+                            {
+                                "target_field": "订单编号",
+                                "value": {
+                                    "type": "source",
+                                    "source": {
+                                        "alias": "source_1",
+                                        "field": "订单编号",
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+    exception = {
+        "id": "exception-1",
+        "company_id": "company-1",
+        "run_id": "run-1",
+        "detail_json": {
+            "anomaly_type": "matched_with_diff",
+            "source_ref": "left_recon_ready",
+            "target_ref": "right_recon_ready",
+            "join_key": [
+                {
+                    "source_field": "订单编号",
+                    "target_field": "订单号",
+                    "source_value": None,
+                    "target_value": "3306514334587002794",
+                }
+            ],
+            "source_record": {"订单编号": None},
+        },
+    }
+
+    browser_calls: list[dict[str, object]] = []
+
+    def fake_browser_records(**kwargs: object) -> list[dict[str, object]]:
+        browser_calls.append(kwargs)
+        return [
+            {
+                "payload": {
+                    "订单编号": "3306514334587002794",
+                    "订单付款时间": "2026-06-08 15:13:48",
+                    "买家实付金额": "197.98",
+                }
+            }
+        ]
+
+    monkeypatch.setattr(
+        execution_exception_detail_hydration.auth_db,
+        "list_browser_collection_records",
+        fake_browser_records,
+    )
+
+    result = execution_exception_detail_hydration.hydrate_execution_exception_details(
+        run=run,
+        scheme=scheme,
+        exceptions=[exception],
+    )
+
+    detail_json = result[0]["detail_json"]
+    assert detail_json["source_record"]["订单付款时间"] == "2026-06-08 15:13:48"
+    assert browser_calls[0]["filters"] == {"订单编号": "3306514334587002794"}

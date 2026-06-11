@@ -20,6 +20,7 @@ import time as monotonic_time
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -3462,6 +3463,8 @@ def _preview_json_safe_value(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, Decimal):
         return str(value)
+    if isinstance(value, float):
+        return value if isfinite(value) else None
     if isinstance(value, dict):
         return {str(key): _preview_json_safe_value(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -3503,8 +3506,18 @@ def _build_preview_sample(
     )
     normalized_rows = [_normalize_preview_row(row) for row in rows or [] if isinstance(row, dict)]
     if error:
-        sample["rows"] = []
-        sample["row_count"] = 0
+        previous_rows = [
+            _normalize_preview_row(row)
+            for row in (previous_sample or {}).get("rows") or []
+            if isinstance(row, dict)
+        ][:limit]
+        sample["rows"] = previous_rows
+        if previous_sample and previous_sample.get("row_count") is not None:
+            sample["row_count"] = previous_sample.get("row_count")
+        else:
+            sample["row_count"] = len(previous_rows)
+        if previous_sample and previous_sample.get("fetched_at") is not None:
+            sample["fetched_at"] = previous_sample.get("fetched_at")
         sample["error"] = error
         sample["error_at"] = _now_iso()
         return sample
@@ -3582,6 +3595,42 @@ def _refresh_database_preview_sample(
         )
     updated = _update_dataset_preview_sample(dataset_row, preview_sample)
     return _extract_preview_sample(updated) if updated else preview_sample
+
+
+def _merge_existing_preview_sample_for_discovered_dataset(
+    *,
+    company_id: str,
+    source_id: str,
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    meta = dict(item.get("meta") or {})
+    if isinstance(meta.get("preview_sample"), dict):
+        return meta
+    try:
+        existing = auth_db.get_unified_data_source_dataset_by_source_resource(
+            company_id=company_id,
+            data_source_id=source_id,
+            resource_key=_safe_text(item.get("resource_key")) or "default",
+            status=None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "database dataset preview cache lookup skipped during discover: source_id=%s resource_key=%s error=%s",
+            source_id,
+            _safe_text(item.get("resource_key")),
+            exc,
+        )
+        return meta
+    preview_sample = _extract_preview_sample(existing)
+    if preview_sample:
+        meta["preview_sample"] = preview_sample
+    return meta
+
+
+def _has_cached_preview_sample(sample: dict[str, Any] | None) -> bool:
+    if not isinstance(sample, dict) or sample.get("error"):
+        return False
+    return "rows" in sample or sample.get("row_count") is not None or bool(sample.get("fetched_at"))
 
 
 def _enrich_dataset_rows_with_source_context(*, company_id: str, dataset_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -6751,15 +6800,28 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
     persisted_rows: list[dict[str, Any]] = []
     persist_errors: list[str] = []
     if persist:
+        preview_refresh_limit_arg = arguments.get("preview_refresh_limit")
+        preview_refresh_limit_value = (
+            DATABASE_DISCOVER_PREVIEW_REFRESH_LIMIT
+            if preview_refresh_limit_arg is None
+            else int(preview_refresh_limit_arg)
+        )
         preview_refresh_limit = max(
             0,
             min(
-                int(arguments.get("preview_refresh_limit") or DATABASE_DISCOVER_PREVIEW_REFRESH_LIMIT),
+                preview_refresh_limit_value,
                 DATABASE_DISCOVER_PREVIEW_REFRESH_LIMIT_MAX,
             ),
         )
         preview_refresh_count = 0
         for item in normalized:
+            item_meta = dict(item["meta"])
+            if _is_database_source_row(source_row):
+                item_meta = _merge_existing_preview_sample_for_discovered_dataset(
+                    company_id=company_id,
+                    source_id=source_id,
+                    item=item,
+                )
             upserted = auth_db.upsert_unified_data_source_dataset(
                 company_id=company_id,
                 data_source_id=source_id,
@@ -6777,7 +6839,7 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
                 last_checked_at=item.get("last_checked_at"),
                 last_sync_at=item.get("last_sync_at"),
                 last_error_message=item.get("last_error_message") or "",
-                meta=item["meta"],
+                meta=item_meta,
             )
             if upserted:
                 if _is_database_source_row(source_row) and preview_refresh_count < preview_refresh_limit:
@@ -9714,6 +9776,11 @@ async def _handle_data_source_get_dataset_detail(arguments: dict[str, Any]) -> d
         return {"success": False, "error": "数据集不存在"}
     if _safe_text(dataset_row.get("data_source_id")) and _safe_text(dataset_row.get("data_source_id")) != source_id:
         return {"success": False, "error": "数据集不属于当前数据源"}
+    if dataset_id:
+        if dataset_code and _safe_text(dataset_row.get("dataset_code")) != dataset_code:
+            return {"success": False, "error": "数据集标识不一致"}
+        if resource_key and _safe_text(dataset_row.get("resource_key")) != resource_key:
+            return {"success": False, "error": "数据集标识不一致"}
 
     sample_limit = max(1, min(int(arguments.get("sample_limit") or arguments.get("limit") or 10), 50))
     refresh = _normalize_bool(arguments.get("refresh"), default=False)
@@ -10083,6 +10150,18 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
                 response["error"] = _safe_text(preview_sample.get("error"))
                 response["message"] = _safe_text(preview_sample.get("error")) or response["message"]
             return response
+        if _has_cached_preview_sample(preview_sample):
+            return {
+                "success": True,
+                "source_id": source_id,
+                "resource_key": (
+                    _safe_text(dataset_row.get("resource_key")) or _resource_key_from_args(arguments)
+                ),
+                "count": 0,
+                "rows": [],
+                "preview_sample": preview_sample,
+                "message": "已返回数据集样例",
+            }
     if _dataset_uses_platform_order_lines(dataset_row):
         records = auth_db.list_platform_order_lines(
             company_id=company_id,

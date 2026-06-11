@@ -421,8 +421,11 @@ function buildShortSummary(
   joinDetails: JoinKeyDetail[],
   compareLines: ExceptionCompareValueLine[],
 ): string {
-  const preferredSide =
-    item.anomalyType === 'target_only' ? 'right' : 'left';
+  const preferredSide = item.anomalyType === 'target_only'
+    ? 'right'
+    : item.anomalyType === 'source_only'
+      ? 'left'
+      : undefined;
   const matchDetail = matchDetailFor(joinDetails, preferredSide);
   if (!matchDetail) return formatExceptionSummaryLines(item.summary || '');
 

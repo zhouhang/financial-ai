@@ -167,6 +167,38 @@ describe('exception business summary display', () => {
     expect(display.conclusion).toBe('订单编号 5118002676174023242 金额不一致');
   });
 
+  it('uses the non-empty join value after a target_only exception is reclassified as matched_with_diff', () => {
+    const item = buildItem({
+      anomalyType: 'matched_with_diff',
+      summary: '仅 交易订单明细表 存在（tb0131100248-店铺订单 缺失）：订单号=3306514334587002794',
+      raw: {
+        detail_json: {
+          join_key: [
+            {
+              source_field: 'biz_key',
+              source_value: null,
+              target_field: 'biz_key',
+              target_value: '3306514334587002794',
+            },
+          ],
+          compare_values: [
+            {
+              source_field: 'amount',
+              target_field: 'paid_amount',
+              source_value: null,
+              target_value: '0',
+            },
+          ],
+        },
+      },
+    });
+
+    const display = buildExceptionBusinessDisplay(item, context);
+
+    expect(display.shortSummary).toBe('订单编号 3306514334587002794 金额不一致');
+    expect(display.conclusion).toBe('订单编号 3306514334587002794 金额不一致');
+  });
+
   it('falls back to formatted original summary chunks when join_key is missing', () => {
     const item = buildItem({
       anomalyType: 'matched_with_diff',

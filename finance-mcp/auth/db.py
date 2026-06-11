@@ -11291,6 +11291,131 @@ def update_execution_run_exception(
 _DIGESTION_ANOMALY_TYPES = ("source_only", "target_only", "matched_with_diff")
 
 
+def _digestion_display_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"none", "null", "nan"}:
+        return ""
+    return text
+
+
+def _digestion_compare_display_name(compare_item: dict) -> str:
+    name = _digestion_display_text(compare_item.get("name"))
+    if name:
+        return name
+    source_field = _digestion_display_text(compare_item.get("source_field"))
+    target_field = _digestion_display_text(compare_item.get("target_field"))
+    if source_field and target_field and source_field != target_field:
+        return f"{source_field} ↔ {target_field}"
+    return source_field or target_field or "字段"
+
+
+def _digestion_key_display(detail_json: dict) -> str:
+    join_key = detail_json.get("join_key")
+    if not isinstance(join_key, list) or not join_key:
+        return ""
+    first = join_key[0] if isinstance(join_key[0], dict) else {}
+    field = (
+        _digestion_display_text(first.get("source_field"))
+        or _digestion_display_text(first.get("target_field"))
+        or "匹配字段"
+    )
+    value = (
+        _digestion_display_text(first.get("source_value"))
+        or _digestion_display_text(first.get("target_value"))
+    )
+    return f"{field}={value}" if value else field
+
+
+def _digestion_side_labels_from_snapshot(source_snapshot_json: Any) -> dict[str, str]:
+    if isinstance(source_snapshot_json, str):
+        try:
+            source_snapshot_json = json.loads(source_snapshot_json)
+        except (TypeError, ValueError):
+            source_snapshot_json = {}
+    snapshot = source_snapshot_json if isinstance(source_snapshot_json, dict) else {}
+    labels = {"source": "来源数据", "target": "目标数据"}
+    for item in snapshot.get("collections") or []:
+        if not isinstance(item, dict):
+            continue
+        binding = item.get("binding")
+        if not isinstance(binding, dict):
+            continue
+        role_code = _digestion_display_text(binding.get("role_code")).lower()
+        target_table = _digestion_display_text(binding.get("input_plan_target_table")).lower()
+        table_name = _digestion_display_text(binding.get("table_name")).lower()
+        label = (
+            _digestion_display_text(binding.get("display_name"))
+            or _digestion_display_text(binding.get("dataset_name"))
+            or _digestion_display_text(binding.get("resource_key"))
+            or _digestion_display_text(binding.get("dataset_code"))
+        )
+        if not label:
+            continue
+        if (
+            role_code.startswith("left")
+            or "left_recon_ready" in target_table
+            or "left_recon_ready" in table_name
+        ):
+            labels["source"] = label
+        elif (
+            role_code.startswith("right")
+            or "right_recon_ready" in target_table
+            or "right_recon_ready" in table_name
+        ):
+            labels["target"] = label
+    return labels
+
+
+def _digestion_reclassified_summary(
+    *,
+    original_summary: str,
+    detail_json: dict,
+    new_type: str,
+    side_labels: dict[str, str] | None = None,
+) -> str:
+    side_labels = side_labels or {}
+    source_label = side_labels.get("source") or "来源数据"
+    target_label = side_labels.get("target") or "目标数据"
+    key_display = _digestion_key_display(detail_json)
+    if new_type == "matched_with_diff":
+        compare_values = detail_json.get("compare_values")
+        compare_item = compare_values[0] if isinstance(compare_values, list) and compare_values else {}
+        compare_name = _digestion_compare_display_name(compare_item if isinstance(compare_item, dict) else {})
+        difference_label = (
+            "金额差异"
+            if any(token in compare_name for token in ("金额", "实付", "款"))
+            else "字段差异"
+        )
+        parts = [f"{source_label} 与 {target_label} {difference_label}"]
+        if key_display:
+            parts.append(f"匹配字段：{key_display}")
+        if compare_name:
+            parts.append(f"对比字段：{compare_name}")
+        return "；".join(parts)
+
+    if new_type == "source_only":
+        summary = f"仅 {source_label} 存在（{target_label} 缺失）"
+        return f"{summary}：{key_display}" if key_display else summary
+    if new_type == "target_only":
+        summary = f"仅 {target_label} 存在（{source_label} 缺失）"
+        return f"{summary}：{key_display}" if key_display else summary
+    return original_summary
+
+
+def _digestion_reclassified_detail(detail_json: Any, new_type: str) -> dict:
+    if isinstance(detail_json, str):
+        try:
+            detail_json = json.loads(detail_json)
+        except (TypeError, ValueError):
+            detail_json = {}
+    detail = dict(detail_json) if isinstance(detail_json, dict) else {}
+    detail["anomaly_type"] = new_type
+    detail["display_reclassified"] = True
+    return detail
+
+
 def apply_diff_digestion_results(
     *,
     run_id: str,
@@ -11318,6 +11443,14 @@ def apply_diff_digestion_results(
     with conn_manager as conn:
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT source_snapshot_json FROM execution_runs WHERE id = %s",
+                    (run_id,),
+                )
+                run_row = cur.fetchone() or {}
+                side_labels = _digestion_side_labels_from_snapshot(
+                    run_row.get("source_snapshot_json") if isinstance(run_row, dict) else {}
+                )
                 for item in results:
                     exception_id = str(item.get("exception_id") or "").strip()
                     outcome = str(item.get("outcome") or "").strip()
@@ -11344,14 +11477,50 @@ def apply_diff_digestion_results(
                             raise ValueError(f"reclassified 结果缺少 new_type (exception_id={exception_id})")
                         cur.execute(
                             """
+                            SELECT summary, detail_json
+                            FROM execution_run_exceptions
+                            WHERE id = %s AND run_id = %s
+                            FOR UPDATE
+                            """,
+                            (exception_id, run_id),
+                        )
+                        exception_row = cur.fetchone()
+                        if not exception_row:
+                            raise ValueError(
+                                f"消化回写未命中异常记录 (run_id={run_id}, exception_id={exception_id})"
+                            )
+                        old_detail = _digestion_reclassified_detail(
+                            exception_row.get("detail_json") if isinstance(exception_row, dict) else {},
+                            new_type,
+                        )
+                        new_summary = _digestion_reclassified_summary(
+                            original_summary=str(
+                                (exception_row.get("summary") if isinstance(exception_row, dict) else "") or ""
+                            ),
+                            detail_json=old_detail,
+                            new_type=new_type,
+                            side_labels=side_labels,
+                        )
+                        cur.execute(
+                            """
                             UPDATE execution_run_exceptions
                             SET anomaly_type = %s,
+                                summary = %s,
+                                detail_json = %s::jsonb,
                                 resolved_to = %s,
                                 review_round = %s,
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE id = %s AND run_id = %s
                             """,
-                            (new_type, new_type, review_round, exception_id, run_id),
+                            (
+                                new_type,
+                                new_summary,
+                                psycopg2.extras.Json(old_detail),
+                                new_type,
+                                review_round,
+                                exception_id,
+                                run_id,
+                            ),
                         )
                     else:  # kept
                         cur.execute(
