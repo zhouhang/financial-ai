@@ -11544,6 +11544,40 @@ def fail_recon_run(job_id: str, error: str = "") -> None:
         logger.error(f"fail_recon_run 失败 (job_id={job_id}): {e}")
 
 
+def find_active_recon_run(
+    *,
+    company_id: str,
+    trigger_mode: str,
+    target_run_id: str,
+) -> dict | None:
+    """查找 queued/running 状态下、trigger_mode 和 run_context.target_run_id 匹配的 job。
+
+    用于入队前去重，避免同一 run_id 的 resolve job 重复排队。
+    返回找到的第一条 job，无匹配返回 None。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM recon_execution_queue
+                    WHERE company_id = %s
+                      AND status IN ('queued', 'running')
+                      AND trigger_mode = %s
+                      AND run_context->>'target_run_id' = %s
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    (company_id, trigger_mode, target_run_id),
+                )
+                row = cur.fetchone()
+                return _normalize_record(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"find_active_recon_run 失败 (target_run_id={target_run_id}): {e}")
+        return None
+
+
 def reclaim_stale_recon_runs(timeout_minutes: int = 15) -> int:
     """把卡在 running 超过 timeout_minutes 的 job 重置回 queued，返回重置数量。"""
     conn_manager = get_conn()

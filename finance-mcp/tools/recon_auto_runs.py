@@ -429,6 +429,19 @@ def create_tools() -> list[Tool]:
                 "required": ["worker_token"],
             },
         ),
+        Tool(
+            name="recon_queue_find_active",
+            description="查询 queued/running 状态下、指定 trigger_mode 和 target_run_id 匹配的 job，用于入队前去重。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "company_id": {"type": "string"},
+                    "trigger_mode": {"type": "string"},
+                    "target_run_id": {"type": "string"},
+                },
+                "required": ["company_id", "trigger_mode", "target_run_id"],
+            },
+        ),
     ]
 
 
@@ -485,6 +498,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
         return _queue_fail_expired_waiting(arguments)
     if name == "recon_queue_fail_failed_collection_waiting":
         return _queue_fail_failed_collection_waiting(arguments)
+    if name == "recon_queue_find_active":
+        return _queue_find_active(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
@@ -1038,3 +1053,23 @@ def _queue_fail_failed_collection_waiting(arguments: dict[str, Any]) -> dict[str
         "success": True,
         "failed": auth_db.fail_waiting_recon_runs_with_failed_collection_jobs(),
     }
+
+
+def _queue_find_active(arguments: dict[str, Any]) -> dict[str, Any]:
+    """查询 queued/running 状态下 trigger_mode + target_run_id 匹配的 job，供入队前去重。
+    不需要 worker_token，API 层直接调用。
+    """
+    company_id = str(arguments.get("company_id") or "").strip()
+    trigger_mode = str(arguments.get("trigger_mode") or "").strip()
+    target_run_id = str(arguments.get("target_run_id") or "").strip()
+    if not company_id or not trigger_mode or not target_run_id:
+        return {"success": False, "error": "company_id / trigger_mode / target_run_id 不能为空"}
+    try:
+        job = auth_db.find_active_recon_run(
+            company_id=company_id,
+            trigger_mode=trigger_mode,
+            target_run_id=target_run_id,
+        )
+        return {"success": True, "found": job is not None, "job": job}
+    except Exception as e:
+        return {"success": False, "error": str(e)}

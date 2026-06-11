@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 import jwt
@@ -72,6 +73,7 @@ from tools.mcp_client import (
     recon_exception_get,
     recon_exception_update,
     recon_queue_enqueue,
+    recon_queue_find_active,
 )
 
 router = APIRouter(prefix="/recon", tags=["recon-auto"])
@@ -1351,6 +1353,96 @@ async def rerun_execution_run_api(
         "run_plan_code": prepare_result.get("run_plan_code") or "",
         "biz_date": prepare_result.get("biz_date") or "",
         "message": "重新对账验证已进入执行队列，请稍后查询运行结果",
+    }
+
+
+def _resolve_run_biz_date(run: dict[str, Any]) -> str:
+    """统一解析 run 业务日期: run_context_json.biz_date 优先，回退 source_snapshot_json.biz_date；没有返回 ""。"""
+    for container in ("run_context_json", "source_snapshot_json"):
+        value = str(((run.get(container) or {}).get("biz_date")) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+@router.post("/runs/{run_id}/diff-digestion")
+async def digest_run_diffs_api(
+    run_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    # 1) 鉴权
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+
+    user = _get_user_from_token(auth_token)
+    if not user or not user.get("company_id"):
+        raise HTTPException(status_code=401, detail="token 无效或已过期")
+
+    company_id = str(user["company_id"])
+
+    # 2) 取 run（复用 execution_run_get）
+    run_result = await execution_run_get(auth_token, run_id)
+    if not run_result.get("success"):
+        raise HTTPException(status_code=404, detail=run_result.get("error", "运行记录不存在"))
+    run = run_result.get("run") or {}
+
+    # 3) 解析业务日期
+    biz_date = _resolve_run_biz_date(run)
+    if not biz_date:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "no_biz_date",
+                "message": "该运行记录缺少业务日期，无法差异消化",
+            },
+        )
+
+    # 4) 当天守卫（公司时区 Asia/Shanghai）
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    if biz_date >= today:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "same_day",
+                "message": "当天差异请第二天或以后再进行差异消化",
+            },
+        )
+
+    # 5) 重复入队守卫
+    find_result = await recon_queue_find_active(
+        company_id=company_id,
+        trigger_mode="resolve",
+        target_run_id=run_id,
+    )
+    if find_result.get("found"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "status": "already_running",
+                "message": "该运行记录的差异消化正在进行，请稍后",
+            },
+        )
+
+    # 6) 入队
+    run_plan_code = str(run.get("plan_code") or "")
+    result = await recon_queue_enqueue(
+        company_id=company_id,
+        run_plan_code=run_plan_code,
+        biz_date=biz_date,
+        trigger_mode="resolve",
+        run_context=_merge_trigger_user_context({"target_run_id": run_id}, user),
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
+
+    # 7) 返回
+    return {
+        "queued": True,
+        "status": "queued",
+        "job_id": str((result.get("job") or {}).get("id") or ""),
+        "run_id": run_id,
+        "biz_date": biz_date,
     }
 
 

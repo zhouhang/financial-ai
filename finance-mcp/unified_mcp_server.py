@@ -314,6 +314,7 @@ _RECON_AUTO_TOOL_NAMES = {
     "recon_queue_requeue_ready_waiting",
     "recon_queue_fail_expired_waiting",
     "recon_queue_fail_failed_collection_waiting",
+    "recon_queue_find_active",
 }
 
 _EXECUTION_TOOL_NAMES = {

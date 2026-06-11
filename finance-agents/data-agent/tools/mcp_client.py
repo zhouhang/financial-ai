@@ -5159,6 +5159,19 @@ async def recon_queue_fail_expired_waiting(worker_token: str) -> dict[str, Any]:
     return await call_mcp_tool("recon_queue_fail_expired_waiting", {"worker_token": worker_token})
 
 
+async def recon_queue_find_active(
+    company_id: str,
+    trigger_mode: str,
+    target_run_id: str,
+) -> dict[str, Any]:
+    """查 queued/running 中 trigger_mode+target_run_id 匹配的 job，用于入队前去重。"""
+    return await call_mcp_tool("recon_queue_find_active", {
+        "company_id": company_id,
+        "trigger_mode": trigger_mode,
+        "target_run_id": target_run_id,
+    })
+
+
 async def alipay_auth_invite_describe(token: str) -> dict[str, Any]:
     return await call_mcp_tool("alipay_auth_invite_describe", {"token": token})
 
