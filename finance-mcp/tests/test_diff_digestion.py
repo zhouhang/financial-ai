@@ -784,3 +784,56 @@ class TestBuildFullReconFramesIntegration:
         assert len(left_df) > 0
         found = set(left_df["客户订单号"].map(str)) & diff_keys
         assert found, "下推取回的左侧数据应包含差异 key"
+
+
+class TestDigestDiffsGuards:
+    """支持范围守卫:不支持的规则形态必须报错拒绝,绝不静默错判。"""
+
+    def _df(self) -> pd.DataFrame:
+        return _side_df([("A", "10")])
+
+    def test_composite_key_mappings_rejected(self) -> None:
+        with pytest.raises(ValueError, match="复合 join key"):
+            digest_diffs(
+                open_diffs=[_open_diff("e-a", "source_only", "A")],
+                source_df=self._df(),
+                target_df=self._df(),
+                key_mappings=[
+                    {"source_field": "订单编号", "target_field": "订单编号"},
+                    {"source_field": "店铺ID", "target_field": "店铺ID"},
+                ],
+                compare_columns_config=DIGEST_COMPARE_CONFIG,
+                rule_id="rule-guard-test",
+            )
+
+    def test_nonempty_key_transformations_rejected(self) -> None:
+        with pytest.raises(ValueError, match="transformations"):
+            digest_diffs(
+                open_diffs=[_open_diff("e-a", "source_only", "A")],
+                source_df=self._df(),
+                target_df=self._df(),
+                key_mappings=DIGEST_KEY_MAPPINGS,
+                compare_columns_config=DIGEST_COMPARE_CONFIG,
+                rule_id="rule-guard-test",
+                key_columns_config={
+                    "mappings": DIGEST_KEY_MAPPINGS,
+                    "transformations": {"source": {"strip_prefix": "'"}, "target": {}},
+                },
+            )
+
+    def test_empty_transformations_dict_not_rejected(self) -> None:
+        """scheme 常态是 {"source": {}, "target": {}},不能误拒。"""
+        results = digest_diffs(
+            open_diffs=[_open_diff("e-a", "source_only", "A")],
+            source_df=self._df(),
+            target_df=self._df(),
+            key_mappings=DIGEST_KEY_MAPPINGS,
+            compare_columns_config=DIGEST_COMPARE_CONFIG,
+            rule_id="rule-guard-test",
+            key_columns_config={
+                "mappings": DIGEST_KEY_MAPPINGS,
+                "match_type": "exact",
+                "transformations": {"source": {}, "target": {}},
+            },
+        )
+        assert results[0]["outcome"] == "resolved"

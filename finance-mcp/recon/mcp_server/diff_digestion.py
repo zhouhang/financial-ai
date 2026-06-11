@@ -91,6 +91,7 @@ def digest_diffs(
     key_mappings: list[dict[str, str]],
     compare_columns_config: list[dict[str, Any]],
     rule_id: str,
+    key_columns_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """把所有差异 key 的两侧子集各取一次,只调一次 _execute_comparison,按 key 映射回每条归宿。
 
@@ -114,6 +115,17 @@ def digest_diffs(
 
     if not key_mappings:
         raise ValueError("digest_diffs 需要至少一个 key mapping")
+    # 支持范围守卫:宁可整轮报错,不可错判(详见 spec §3.2)。
+    # 复合 key:子集过滤/桶回映只看首字段,不同 key 组合会折叠 → 可能假 resolved。
+    if len(key_mappings) > 1:
+        raise ValueError("差异消化暂不支持复合 join key 规则(key_mappings>1)")
+    # key transformations:台账存的是转换后 key,而子集过滤用原始值,
+    # "转换后才相等"的行进不了子集 → 独占判定建立在残缺行集上,可能假 resolved。
+    transformations = (key_columns_config or {}).get("transformations") or {}
+    if isinstance(transformations, dict) and any(
+        isinstance(side_cfg, dict) and side_cfg for side_cfg in transformations.values()
+    ):
+        raise ValueError("差异消化暂不支持 key transformations 规则")
     source_key_field = str(key_mappings[0].get("source_field") or "").strip()
     target_key_field = str(key_mappings[0].get("target_field") or "").strip()
 
@@ -134,7 +146,7 @@ def digest_diffs(
             key_mappings,
             compare_columns_config,
             rule_id,
-            None,
+            key_columns_config,
         )
         # 桶 DataFrame 是 merge 产物:两侧 key 字段同名时只有 source_/target_
         # 角色前缀列,必须用 recon_tool 的行读取 helper 才能取回 key 值。
