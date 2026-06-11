@@ -11406,7 +11406,7 @@ def apply_diff_digestion_results(
                         last_resolved_at = CURRENT_TIMESTAMP,
                         anomaly_count = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
+                    WHERE id = %s AND review_round = %s
                     """,
                     (
                         psycopg2.extras.Json(summary_patch),
@@ -11414,10 +11414,14 @@ def apply_diff_digestion_results(
                         review_round,
                         total_open,
                         run_id,
+                        review_round - 1,
                     ),
                 )
                 if cur.rowcount != 1:
-                    raise ValueError(f"消化回写未命中运行记录 (run_id={run_id})")
+                    # 乐观锁:review_round 不等于预期前值 = 有并发消化在跑(prod 双 worker),整批回滚
+                    raise ValueError(
+                        f"消化回写冲突或未命中运行记录 (run_id={run_id}, expected_review_round={review_round - 1})"
+                    )
             conn.commit()
         except Exception as e:
             conn.rollback()

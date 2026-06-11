@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import re
 import shutil
@@ -3235,8 +3236,6 @@ def _exception_to_open_diff(row: dict[str, Any], source_key_field: str) -> dict[
     """
     detail = row.get("detail_json")
     if isinstance(detail, str):
-        import json
-
         try:
             detail = json.loads(detail)
         except (TypeError, ValueError):
@@ -3308,6 +3307,8 @@ def _handle_recon_diff_digestion(arguments: dict[str, Any]) -> dict[str, Any]:
             "resolved": 0,
             "reclassified": 0,
             "kept": 0,
+            "review_round": int(run.get("review_round") or 0),
+            "open_counts": {},
             "message": "无未关闭差异",
         }
     open_diffs = [_exception_to_open_diff(row, source_key_field) for row in open_rows]
