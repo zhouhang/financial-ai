@@ -174,6 +174,53 @@ def _build_sync_strategy(columns: list[dict[str, Any]]) -> dict[str, Any]:
     return {"mode": "full"}
 
 
+_PREVIEW_DATE_FIELD_CANDIDATES = (
+    "updated_at",
+    "update_time",
+    "modified_at",
+    "modified_time",
+    "last_updated_at",
+    "created_at",
+    "create_time",
+    "created_time",
+)
+
+
+def _iter_schema_field_names(dataset: dict[str, Any]) -> Iterator[str]:
+    schema_summary = dataset.get("schema_summary") if isinstance(dataset.get("schema_summary"), dict) else {}
+    for key in ("fields", "columns"):
+        value = schema_summary.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or item.get("raw_name") or item.get("column_name") or "").strip()
+                    if name:
+                        yield name
+
+
+def _resolve_preview_order_field(dataset: dict[str, Any]) -> tuple[str, dict[str, str]]:
+    collection_config = dataset.get("collection_config") if isinstance(dataset.get("collection_config"), dict) else {}
+    meta = dataset.get("meta") if isinstance(dataset.get("meta"), dict) else {}
+    meta_collection = meta.get("collection_config") if isinstance(meta.get("collection_config"), dict) else {}
+    configured = str(
+        collection_config.get("date_field")
+        or collection_config.get("cursor_field")
+        or meta_collection.get("date_field")
+        or meta_collection.get("cursor_field")
+        or ""
+    ).strip()
+    available = {name.lower(): name for name in _iter_schema_field_names(dataset)}
+    if configured and (not available or configured.lower() in available):
+        field = available.get(configured.lower(), configured)
+        return field, {"order": "date_field_desc", "order_field": field}
+    for candidate in _PREVIEW_DATE_FIELD_CANDIDATES:
+        if candidate in available:
+            return available[candidate], {"order": "date_field_desc", "order_field": available[candidate]}
+    if "id" in available:
+        return available["id"], {"order": "primary_key_desc", "order_field": available["id"]}
+    return "", {"order": "connector_default", "order_field": ""}
+
+
 def _postgres_relkind_to_dataset_kind(relkind: str) -> str:
     normalized = str(relkind or "").strip().lower()
     if normalized in {"v", "m"}:
@@ -532,6 +579,7 @@ class DatabaseConnector(BaseDataSourceConnector):
         dataset = arguments.get("dataset") if isinstance(arguments.get("dataset"), dict) else {}
         extract_config = dataset.get("extract_config") if isinstance(dataset.get("extract_config"), dict) else {}
         limit = max(1, min(_to_int(arguments.get("limit"), 10), 200))
+        order_field, preview_order = _resolve_preview_order_field(dataset)
 
         schema_name = str(arguments.get("schema") or extract_config.get("schema") or "").strip()
         table_name = str(arguments.get("table") or extract_config.get("table") or "").strip()
@@ -553,11 +601,23 @@ class DatabaseConnector(BaseDataSourceConnector):
         rows: list[dict[str, Any]] = []
         try:
             if db_type == "postgresql":
-                rows = self._preview_postgresql(cfg, schema_name or "public", table_name, limit)
+                rows = self._preview_postgresql(
+                    cfg,
+                    schema_name or "public",
+                    table_name,
+                    limit,
+                    order_field=order_field,
+                )
             elif db_type == "mysql":
-                rows = self._preview_mysql(cfg, schema_name or str(cfg.get("database") or ""), table_name, limit)
+                rows = self._preview_mysql(
+                    cfg,
+                    schema_name or str(cfg.get("database") or ""),
+                    table_name,
+                    limit,
+                    order_field=order_field,
+                )
             elif db_type == "sqlite":
-                rows = self._preview_sqlite(cfg, table_name, limit)
+                rows = self._preview_sqlite(cfg, table_name, limit, order_field=order_field)
             else:
                 return {
                     "success": False,
@@ -574,6 +634,7 @@ class DatabaseConnector(BaseDataSourceConnector):
                     "provider_code": self.ctx.provider_code,
                     "rows": [],
                     "count": 0,
+                    "preview_order": preview_order,
                     "message": "当前 Hologres 账号无权读取样例数据，已跳过样例预览",
                 }
             logger.error("database preview failed: %s", exc, exc_info=True)
@@ -590,6 +651,7 @@ class DatabaseConnector(BaseDataSourceConnector):
             "provider_code": self.ctx.provider_code,
             "rows": rows,
             "count": len(rows),
+            "preview_order": preview_order,
             "message": f"已返回 {len(rows)} 行样例数据",
         }
 
@@ -1198,14 +1260,21 @@ class DatabaseConnector(BaseDataSourceConnector):
         schema_name: str,
         table_name: str,
         limit: int,
+        order_field: str = "",
     ) -> list[dict[str, Any]]:
         conn = self._connect_postgresql(cfg)
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                query = pg_sql.SQL("SELECT * FROM {}.{} LIMIT %s").format(
+                base = pg_sql.SQL("SELECT * FROM {}.{}").format(
                     pg_sql.Identifier(schema_name),
                     pg_sql.Identifier(table_name),
                 )
+                if order_field:
+                    query = base + pg_sql.SQL(" ORDER BY {} DESC NULLS LAST LIMIT %s").format(
+                        pg_sql.Identifier(order_field)
+                    )
+                else:
+                    query = base + pg_sql.SQL(" LIMIT %s")
                 cur.execute(query, (limit,))
                 return [dict(row) for row in cur.fetchall() or []]
         finally:
@@ -1217,14 +1286,16 @@ class DatabaseConnector(BaseDataSourceConnector):
         schema_name: str,
         table_name: str,
         limit: int,
+        order_field: str = "",
     ) -> list[dict[str, Any]]:
         conn = self._connect_mysql(cfg)
         safe_schema = schema_name.replace("`", "``") or str(cfg.get("database") or "")
         safe_table = table_name.replace("`", "``")
+        order_clause = f" ORDER BY `{order_field.replace('`', '``')}` DESC" if order_field else ""
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT * FROM `{safe_schema}`.`{safe_table}` LIMIT %s",
+                    f"SELECT * FROM `{safe_schema}`.`{safe_table}`{order_clause} LIMIT %s",
                     (limit,),
                 )
                 rows = cur.fetchall() or []
@@ -1237,14 +1308,17 @@ class DatabaseConnector(BaseDataSourceConnector):
         cfg: dict[str, Any],
         table_name: str,
         limit: int,
+        order_field: str = "",
     ) -> list[dict[str, Any]]:
         conn = self._connect_sqlite(cfg)
         conn.row_factory = sqlite3.Row
         safe_table = table_name.replace("'", "''")
+        safe_order = order_field.replace('"', '""')
+        order_clause = f' ORDER BY "{safe_order}" DESC' if order_field else ""
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT * FROM '{safe_table}' LIMIT ?",
+                    f"SELECT * FROM '{safe_table}'{order_clause} LIMIT ?",
                     (limit,),
                 )
                 rows = cur.fetchall() or []
