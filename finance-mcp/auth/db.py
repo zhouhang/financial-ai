@@ -11229,6 +11229,143 @@ def update_execution_run_exception(
         return None
 
 
+# 差异消化重判会改动的差异桶(matched_exact / total_records 是历史事实,一律不动)
+_DIGESTION_ANOMALY_TYPES = ("source_only", "target_only", "matched_with_diff")
+
+
+def apply_diff_digestion_results(
+    *,
+    run_id: str,
+    results: list[dict],
+    review_round: int,
+    digestion_meta: dict | None = None,
+) -> dict:
+    """差异消化结果单事务回写(逐条改异常 → 重算 open 计数 → 原地更新 run)。
+
+    results 每条: {"exception_id", "outcome": "resolved"|"reclassified"|"kept",
+    "new_type", "resolved_to"?}。
+    - resolved → 关闭异常(fix_status='resolved_by_digestion', resolved_to/resolved_at)。
+    - reclassified → 改 anomaly_type=new_type(保持 open),resolved_to=new_type。
+    - kept → 只 +review_round。
+    然后按该 run is_closed=false 重算各 anomaly_type 计数,更新
+    execution_runs.recon_result_summary_json 的 source_only/target_only/
+    matched_with_diff + has_anomaly(matched_exact 与 total_records 一律不动),
+    并写 resolution_summary_json / review_round / last_resolved_at。
+
+    任一条未命中(exception_id 不属于该 run)→ 整批回滚并抛错,不留半套状态。
+    返回 {resolved, reclassified, kept, open_counts}。
+    """
+    counts = {"resolved": 0, "reclassified": 0, "kept": 0}
+    conn_manager = get_conn()
+    with conn_manager as conn:
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                for item in results:
+                    exception_id = str(item.get("exception_id") or "").strip()
+                    outcome = str(item.get("outcome") or "").strip()
+                    new_type = str(item.get("new_type") or "").strip()
+                    if not exception_id or outcome not in counts:
+                        raise ValueError(f"非法消化结果条目: outcome={outcome!r}, exception_id={exception_id!r}")
+                    if outcome == "resolved":
+                        resolved_to = str(item.get("resolved_to") or "matched").strip()
+                        cur.execute(
+                            """
+                            UPDATE execution_run_exceptions
+                            SET is_closed = TRUE,
+                                fix_status = 'resolved_by_digestion',
+                                resolved_to = %s,
+                                resolved_at = CURRENT_TIMESTAMP,
+                                review_round = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s AND run_id = %s
+                            """,
+                            (resolved_to, review_round, exception_id, run_id),
+                        )
+                    elif outcome == "reclassified":
+                        if not new_type:
+                            raise ValueError(f"reclassified 结果缺少 new_type (exception_id={exception_id})")
+                        cur.execute(
+                            """
+                            UPDATE execution_run_exceptions
+                            SET anomaly_type = %s,
+                                resolved_to = %s,
+                                review_round = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s AND run_id = %s
+                            """,
+                            (new_type, new_type, review_round, exception_id, run_id),
+                        )
+                    else:  # kept
+                        cur.execute(
+                            """
+                            UPDATE execution_run_exceptions
+                            SET review_round = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s AND run_id = %s
+                            """,
+                            (review_round, exception_id, run_id),
+                        )
+                    if cur.rowcount != 1:
+                        raise ValueError(
+                            f"消化回写未命中异常记录 (run_id={run_id}, exception_id={exception_id})"
+                        )
+                    counts[outcome] += 1
+
+                # 重算该 run 仍 open 的各差异类型计数
+                cur.execute(
+                    """
+                    SELECT anomaly_type, count(*) AS cnt
+                    FROM execution_run_exceptions
+                    WHERE run_id = %s AND is_closed = FALSE
+                    GROUP BY anomaly_type
+                    """,
+                    (run_id,),
+                )
+                open_counts = {anomaly_type: 0 for anomaly_type in _DIGESTION_ANOMALY_TYPES}
+                for row in cur.fetchall():
+                    open_counts[str(row["anomaly_type"])] = int(row["cnt"])
+                total_open = sum(open_counts.values())
+
+                summary_patch = {
+                    anomaly_type: open_counts.get(anomaly_type, 0)
+                    for anomaly_type in _DIGESTION_ANOMALY_TYPES
+                }
+                summary_patch["has_anomaly"] = total_open > 0
+                resolution_summary = {
+                    "resolved": counts["resolved"],
+                    "reclassified": counts["reclassified"],
+                    "kept": counts["kept"],
+                    "by_type": dict(open_counts),
+                    "digestion_meta": dict(digestion_meta or {}),
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }
+                cur.execute(
+                    """
+                    UPDATE execution_runs
+                    SET recon_result_summary_json = recon_result_summary_json || %s::jsonb,
+                        resolution_summary_json = %s::jsonb,
+                        review_round = %s,
+                        last_resolved_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (
+                        psycopg2.extras.Json(summary_patch),
+                        psycopg2.extras.Json(resolution_summary),
+                        review_round,
+                        run_id,
+                    ),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError(f"消化回写未命中运行记录 (run_id={run_id})")
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"差异消化回写失败,整批回滚 (run_id={run_id}, review_round={review_round}): {e}")
+            raise
+    return {**counts, "open_counts": open_counts}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # recon_execution_queue  （持久化对账执行队列）
 # ──────────────────────────────────────────────────────────────────────────────
