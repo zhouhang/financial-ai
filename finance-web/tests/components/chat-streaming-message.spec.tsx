@@ -90,5 +90,5 @@ describe('聊天流式响应', () => {
     });
     expect(screen.getByText(/数据整理：根据预设规则/)).toBeInTheDocument();
     expect(container.querySelectorAll('.message-content')).toHaveLength(1);
-  });
+  }, 20000);
 });

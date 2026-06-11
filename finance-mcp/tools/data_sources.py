@@ -19,6 +19,7 @@ import re
 import time as monotonic_time
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +104,8 @@ DATASET_ORIGIN_TYPES = {"fixed", "discovered", "imported_openapi", "manual"}
 AUTO_DISCOVER_DATASET_LIMIT = 300
 AUTO_SAMPLE_DATASET_LIMIT = 20
 AUTO_SAMPLE_ROW_LIMIT = 10
+DATABASE_DISCOVER_PREVIEW_REFRESH_LIMIT = 20
+DATABASE_DISCOVER_PREVIEW_REFRESH_LIMIT_MAX = 50
 SEMANTIC_STATUS_VALUES = {"generated_basic", "generated_with_samples", "llm_generated", "manual_updated"}
 SEMANTIC_FIELD_CONFIDENCE_THRESHOLD = 0.75
 SEMANTIC_SAMPLE_ROW_LIMIT = 10
@@ -3454,6 +3457,26 @@ def _preview_sample_order(
     return order, order_field
 
 
+def _preview_json_safe_value(value: Any) -> Any:
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _preview_json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_preview_json_safe_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_preview_json_safe_value(item) for item in value]
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    return str(value)
+
+
+def _normalize_preview_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {str(key): _preview_json_safe_value(value) for key, value in row.items()}
+
+
 def _build_preview_sample(
     *,
     rows: list[dict[str, Any]] | None = None,
@@ -3478,7 +3501,7 @@ def _build_preview_sample(
             "order_field": order_field,
         }
     )
-    normalized_rows = [dict(row) for row in rows or [] if isinstance(row, dict)]
+    normalized_rows = [_normalize_preview_row(row) for row in rows or [] if isinstance(row, dict)]
     if error:
         sample["rows"] = []
         sample["row_count"] = 0
@@ -6728,6 +6751,14 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
     persisted_rows: list[dict[str, Any]] = []
     persist_errors: list[str] = []
     if persist:
+        preview_refresh_limit = max(
+            0,
+            min(
+                int(arguments.get("preview_refresh_limit") or DATABASE_DISCOVER_PREVIEW_REFRESH_LIMIT),
+                DATABASE_DISCOVER_PREVIEW_REFRESH_LIMIT_MAX,
+            ),
+        )
+        preview_refresh_count = 0
         for item in normalized:
             upserted = auth_db.upsert_unified_data_source_dataset(
                 company_id=company_id,
@@ -6749,7 +6780,7 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
                 meta=item["meta"],
             )
             if upserted:
-                if _is_database_source_row(source_row):
+                if _is_database_source_row(source_row) and preview_refresh_count < preview_refresh_limit:
                     try:
                         _refresh_database_preview_sample(
                             source_row,
@@ -6758,7 +6789,9 @@ async def _handle_data_source_discover_datasets(arguments: dict[str, Any]) -> di
                             AUTO_SAMPLE_ROW_LIMIT,
                             "dataset_discover",
                         )
+                        preview_refresh_count += 1
                     except Exception as exc:
+                        preview_refresh_count += 1
                         logger.warning(
                             "database dataset preview refresh skipped during discover: source_id=%s dataset_id=%s error=%s",
                             source_id,

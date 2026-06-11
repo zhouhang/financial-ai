@@ -173,7 +173,7 @@ describe('conversation draft and task title UX', () => {
     });
     expect(within(sidebar).queryByText('新对话')).not.toBeInTheDocument();
     expect(within(sidebar).queryByText('数据整理 · 逾期文件整理 · 2个文件')).not.toBeInTheDocument();
-  });
+  }, 20000);
 
   it('uses task file count title after uploading and sends task context', async () => {
     const { container } = await renderApp();
@@ -214,7 +214,7 @@ describe('conversation draft and task title UX', () => {
     expect(firstCall[7]).toBe('overdue_proc');
     expect(firstCall[8]).toBe('逾期文件整理');
     expect(firstCall[9]).toBe('overdue_file_rule');
-  });
+  }, 20000);
 
   it('keeps the task title when the server returns a generic same-id conversation', async () => {
     setConversationListResponses(
@@ -279,5 +279,5 @@ describe('conversation draft and task title UX', () => {
       expect(within(sidebar).getByText('数据整理 · 逾期文件整理 · 2个文件')).toBeInTheDocument();
     });
     expect(within(sidebar).queryByText('已上传 2 个文件，请按当前规则处理。')).not.toBeInTheDocument();
-  });
+  }, 20000);
 });

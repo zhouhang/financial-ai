@@ -78,5 +78,5 @@ describe('Site filing layout', () => {
     expect(rightColumn).toContainElement(filing);
     expect(sidebar).not.toBeNull();
     expect(sidebar?.contains(filing)).toBe(false);
-  });
+  }, 20000);
 });

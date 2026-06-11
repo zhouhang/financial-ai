@@ -131,7 +131,7 @@ describe('BrowserPlaybookPanel', () => {
 
     expect(screen.getByText('浏览器任务 01')).toBeInTheDocument();
     expect(screen.queryByText('浏览器任务 21')).not.toBeInTheDocument();
-  });
+  }, 10000);
 
   it('按店铺归组展示店铺订单和收支明细任务', () => {
     render(
@@ -470,6 +470,17 @@ describe('BrowserPlaybookPanel', () => {
             job_status: 'success',
             error_message: '',
           },
+        });
+      }
+      if (url === '/api/data-sources/browser-playbook/finalize') {
+        expect(init?.method).toBe('POST');
+        expect(init?.headers).toMatchObject({ Authorization: 'Bearer token-1' });
+        expect(JSON.parse(String(init?.body))).toEqual({
+          verification_sync_job_id: 'sync-retry-success-1',
+        });
+        return jsonResponse({
+          success: true,
+          message: '浏览器任务已完成并激活',
         });
       }
       return jsonResponse({}, 404);

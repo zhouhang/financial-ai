@@ -173,33 +173,53 @@ def test_digest_run_diffs_api_queues_resolve_job(monkeypatch: pytest.MonkeyPatch
     assert call["run_context"]["target_run_id"] == "run-abc"
 
 
-def test_digest_run_diffs_api_rejects_same_day_biz_date(monkeypatch: pytest.MonkeyPatch) -> None:
-    """biz_date == today → 400,message 含"当天差异请第二天或以后再进行差异消化",未入队。"""
+def test_digest_run_diffs_api_queues_same_day_biz_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    """biz_date == today 也应入队；当天差异可能已能与已有对侧数据消化。"""
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
     today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
     run = _make_run(run_id="run-today", biz_date_in_run_context=today)
-    enqueue_calls: list[Any] = []
+    enqueue_calls: list[dict[str, Any]] = []
 
     async def fake_get(auth_token: str, run_id: str) -> dict[str, Any]:
         return {"success": True, "run": run}
 
-    async def fake_enqueue(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        enqueue_calls.append(kwargs)
-        return _make_enqueue_result()
+    async def fake_find_active(company_id: str, trigger_mode: str, target_run_id: str) -> dict[str, Any]:
+        return {"success": True, "found": False}
+
+    async def fake_enqueue(
+        company_id: str,
+        run_plan_code: str,
+        biz_date: str = "",
+        trigger_mode: str = "schedule",
+        run_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        enqueue_calls.append({
+            "company_id": company_id,
+            "run_plan_code": run_plan_code,
+            "biz_date": biz_date,
+            "trigger_mode": trigger_mode,
+            "run_context": run_context,
+        })
+        return _make_enqueue_result("job-today")
 
     monkeypatch.setattr(auto_run_api, "execution_run_get", fake_get)
+    monkeypatch.setattr(auto_run_api, "recon_queue_find_active", fake_find_active)
     monkeypatch.setattr(auto_run_api, "recon_queue_enqueue", fake_enqueue)
 
-    with pytest.raises(auto_run_api.HTTPException) as exc:
-        asyncio.run(
-            auto_run_api.digest_run_diffs_api("run-today", authorization=_auth_header())
-        )
+    result = asyncio.run(
+        auto_run_api.digest_run_diffs_api("run-today", authorization=_auth_header())
+    )
 
-    assert exc.value.status_code == 400
-    assert "当天差异请第二天或以后再进行差异消化" in str(exc.value.detail)
-    assert len(enqueue_calls) == 0, "同天不应入队"
+    assert result["queued"] is True
+    assert result["job_id"] == "job-today"
+    assert result["biz_date"] == today
+    assert len(enqueue_calls) == 1
+    call = enqueue_calls[0]
+    assert call["trigger_mode"] == "resolve"
+    assert call["biz_date"] == today
+    assert call["run_context"]["target_run_id"] == "run-today"
 
 
 def test_digest_run_diffs_api_rejects_missing_biz_date(monkeypatch: pytest.MonkeyPatch) -> None:

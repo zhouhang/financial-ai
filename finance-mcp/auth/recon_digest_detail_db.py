@@ -195,6 +195,22 @@ def _compute_totals(normalized_rollups: list[dict[str, Any]]) -> dict[str, Any]:
     return totals
 
 
+def _snapshot_totals(structured: dict[str, Any]) -> dict[str, Any]:
+    """Return immutable digest totals captured at delivery time when available."""
+    totals = _as_dict(structured.get("totals"))
+    return _json_safe(totals) if totals else {}
+
+
+def _merge_snapshot_totals(
+    computed_totals: dict[str, Any],
+    structured: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep computed fallback metrics while freezing delivered snapshot values."""
+    totals = dict(computed_totals)
+    totals.update(_snapshot_totals(structured))
+    return totals
+
+
 def _parse_date(value: Any) -> date | None:
     if isinstance(value, datetime):
         return value.date()
@@ -435,6 +451,7 @@ def get_public_digest_detail_bundle(
                     _normalize_diff_row(row, as_of_ts=as_of_ts) for row in _rows(cur)
                 ]
                 normalized_rollups = [_normalize_rollup_row(row) for row in rollups]
+                totals = _merge_snapshot_totals(_compute_totals(normalized_rollups), structured)
 
                 return {
                     "success": True,
@@ -445,7 +462,7 @@ def get_public_digest_detail_bundle(
                     "layout": layout,
                     "data": {
                         "rollups": normalized_rollups,
-                        "totals": _compute_totals(normalized_rollups),
+                        "totals": totals,
                         "alerts": alerts,
                         "canonical_lines": canonical_lines,
                         "sampling": {

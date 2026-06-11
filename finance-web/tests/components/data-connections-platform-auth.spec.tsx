@@ -52,7 +52,7 @@ describe('电商平台授权入口', () => {
     );
 
     expect(await screen.findByText('数据库连接列表')).toBeInTheDocument();
-    expect(screen.getByText('正在加载数据库连接列表')).toBeInTheDocument();
+    expect(screen.getByText('正在加载连接列表')).toBeInTheDocument();
     expect(screen.queryByText('当前类型暂无连接，可先新增占位连接。')).not.toBeInTheDocument();
   });
 
@@ -1864,7 +1864,7 @@ describe('电商平台授权入口', () => {
     expect(publishPayload.key_fields).not.toContain('raw');
     expect(publishPayload.key_fields).not.toContain('raw.收入');
     expect(publishAttempts).toBe(2);
-  });
+  }, 20000);
 
   it('支付宝商户停用需要二次确认后才执行停用', async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];

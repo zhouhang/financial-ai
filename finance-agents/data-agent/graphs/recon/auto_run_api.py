@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 import jwt
@@ -1398,18 +1397,7 @@ async def digest_run_diffs_api(
             },
         )
 
-    # 4) 当天守卫（公司时区 Asia/Shanghai）
-    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-    if biz_date >= today:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "status": "same_day",
-                "message": "当天差异请第二天或以后再进行差异消化",
-            },
-        )
-
-    # 5) 重复入队守卫
+    # 4) 重复入队守卫
     find_result = await recon_queue_find_active(
         company_id=company_id,
         trigger_mode="resolve",
@@ -1424,7 +1412,7 @@ async def digest_run_diffs_api(
             },
         )
 
-    # 6) 入队
+    # 5) 入队
     run_plan_code = str(run.get("plan_code") or "")
     result = await recon_queue_enqueue(
         company_id=company_id,
@@ -1436,7 +1424,7 @@ async def digest_run_diffs_api(
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
 
-    # 7) 返回
+    # 6) 返回
     return {
         "queued": True,
         "status": "queued",

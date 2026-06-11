@@ -286,6 +286,77 @@ def test_total_net_deduction_rate_uses_net_receivable_settled_denominator(monkey
     assert bundle["data"]["totals"]["net_deduction_rate"] == 0.1
 
 
+def test_public_digest_totals_use_delivered_snapshot_when_rollup_changes(monkeypatch) -> None:
+    rows = {
+        "digest": {
+            "id": "digest-001",
+            "company_id": "company-001",
+            "period": "daily",
+            "period_start": "2026-06-05",
+            "period_end": "2026-06-05",
+            "structured": {
+                "domain": "ecom",
+                "totals": {
+                    "receivable_total": 150,
+                    "refund_total": 30,
+                    "net_receivable_total": 120,
+                    "settled_total": 100,
+                    "normal_in_transit_amount": 10,
+                    "stuck_amount": 10,
+                    "net_deduction_total": 2,
+                    "refund_ratio": 0.2,
+                    "in_transit_ratio": 20 / 120,
+                },
+                "rollup_scope": {"plan_codes": ["p1"], "recon_types": ["fund"]},
+            },
+            "narrative": "",
+            "status": "delivered",
+        },
+        "layout": {
+            "layout_code": "layout",
+            "domain": "ecom",
+            "view": "boss",
+            "sections": [],
+            "version": 1,
+        },
+        "rollups": [
+            {
+                "plan_code": "p1",
+                "plan_name_snapshot": "Plan 1",
+                "recon_type": "fund",
+                "biz_date": date(2026, 6, 5),
+                "receivable_amount_total": Decimal("150"),
+                "refund_amount_total": Decimal("0"),
+                "net_receivable_amount_total": Decimal("150"),
+                "settled_amount_total": Decimal("100"),
+                "normal_in_transit_amount_total": Decimal("0"),
+                "stuck_amount_total": Decimal("0"),
+                "net_deduction_total": Decimal("2"),
+                "settled_order_count": 3,
+                "matched_with_diff_count": 1,
+            }
+        ],
+        "lines": [],
+        "alerts": [],
+        "count": {"total": 0},
+    }
+    _patch_conn(monkeypatch, rows)
+
+    bundle = recon_digest_detail_db.get_public_digest_detail_bundle(
+        digest_id="digest-001",
+        company_id="company-001",
+        view="boss",
+        biz_date="2026-06-05",
+    )
+
+    assert bundle is not None
+    assert bundle["data"]["totals"]["refund_total"] == 30
+    assert bundle["data"]["totals"]["normal_in_transit_amount"] == 10
+    assert bundle["data"]["totals"]["stuck_amount"] == 10
+    assert bundle["data"]["totals"]["net_receivable_total"] == 120
+    assert bundle["data"]["rollups"][0]["refund_total"] == 0
+
+
 def test_list_public_digest_diff_rows_uses_shared_join_sql_and_filters_recon_type(
     monkeypatch,
 ) -> None:

@@ -35,6 +35,7 @@ from auth.recon_digest_token import (
 )
 from security_utils import resolve_upload_file_path
 from tools.execution_exception_detail_hydration import hydrate_execution_exception_details
+from tools.recon_rollup_meta import enrich_plan_meta_with_rollup, has_enabled_rollup
 from tools.rule_schema import validate_rule_record
 
 
@@ -51,6 +52,38 @@ _DEFAULT_RECON_OUTPUT_SHEETS = {
     "matched_with_diff": "差异记录",
 }
 logger = logging.getLogger(__name__)
+
+
+def _load_recon_rule_for_scheme(scheme: dict[str, Any]) -> dict[str, Any]:
+    recon_rule_code = _as_text(scheme.get("recon_rule_code"))
+    if not recon_rule_code:
+        return {}
+    from tools.rules import get_rule
+
+    rule_row = get_rule(recon_rule_code)
+    rule = rule_row.get("rule") if isinstance(rule_row, dict) else None
+    return rule if isinstance(rule, dict) else {}
+
+
+def _plan_meta_with_inferred_rollup(
+    *,
+    plan_name: str,
+    schedule_type: str,
+    plan_meta_json: dict[str, Any] | None,
+    scheme: dict[str, Any],
+    input_bindings_json: list[dict[str, Any]] | None,
+    is_enabled: bool,
+) -> tuple[dict[str, Any], str]:
+    meta, warnings = enrich_plan_meta_with_rollup(
+        plan_name=plan_name,
+        schedule_type=schedule_type,
+        plan_meta_json=plan_meta_json,
+        recon_rule=_load_recon_rule_for_scheme(scheme),
+        input_bindings_json=input_bindings_json,
+    )
+    if is_enabled and schedule_type == "daily" and not has_enabled_rollup(meta):
+        return meta, warnings[0] if warnings else "日报 rollup 配置缺失"
+    return meta, ""
 
 
 def create_tools() -> list[Tool]:
@@ -2532,6 +2565,17 @@ def _plan_create(arguments: dict[str, Any]) -> dict[str, Any]:
         _ALLOWED_SCHEDULE_TYPES,
         "schedule_type",
     )
+    input_bindings_json = [v for v in _safe_list(arguments.get("input_bindings_json")) if isinstance(v, dict)]
+    plan_meta_json, rollup_error = _plan_meta_with_inferred_rollup(
+        plan_name=plan_name,
+        schedule_type=schedule_type,
+        plan_meta_json=_safe_dict(arguments.get("plan_meta_json")),
+        scheme=scheme,
+        input_bindings_json=input_bindings_json,
+        is_enabled=_as_bool(arguments.get("is_enabled"), True),
+    )
+    if rollup_error:
+        return {"success": False, "error": rollup_error}
     item = auth_db.create_execution_run_plan(
         company_id=company_id,
         plan_name=plan_name,
@@ -2540,10 +2584,10 @@ def _plan_create(arguments: dict[str, Any]) -> dict[str, Any]:
         schedule_type=schedule_type,
         schedule_expr=str(arguments.get("schedule_expr") or ""),
         biz_date_offset=str(arguments.get("biz_date_offset") or "previous_day"),
-        input_bindings_json=[v for v in _safe_list(arguments.get("input_bindings_json")) if isinstance(v, dict)],
+        input_bindings_json=input_bindings_json,
         channel_config_id=_normalize_optional_uuid(arguments.get("channel_config_id")),
         owner_mapping_json=_safe_dict(arguments.get("owner_mapping_json")),
-        plan_meta_json=_safe_dict(arguments.get("plan_meta_json")),
+        plan_meta_json=plan_meta_json,
         is_enabled=_as_bool(arguments.get("is_enabled"), True),
         created_by=str(user.get("user_id") or user.get("id") or "") or None,
     )
@@ -2576,6 +2620,9 @@ def _plan_update(arguments: dict[str, Any]) -> dict[str, Any]:
     plan_id = _pick_plan_id(arguments)
     if not plan_id:
         return {"success": False, "error": "plan_id 不能为空"}
+    current_plan = auth_db.get_execution_run_plan(company_id=company_id, plan_id=plan_id)
+    if not current_plan:
+        return {"success": False, "error": "运行计划不存在或更新失败"}
     schedule_type = arguments.get("schedule_type")
     if schedule_type is not None:
         schedule_type = _ensure_allowed(
@@ -2588,6 +2635,40 @@ def _plan_update(arguments: dict[str, Any]) -> dict[str, Any]:
         scheme = auth_db.get_execution_scheme(company_id=company_id, scheme_code=_as_text(scheme_code))
         if not scheme:
             return {"success": False, "error": "scheme_code 对应方案不存在"}
+    else:
+        scheme = auth_db.get_execution_scheme(
+            company_id=company_id,
+            scheme_code=_as_text(current_plan.get("scheme_code")),
+        )
+        if not scheme:
+            return {"success": False, "error": "当前运行计划关联方案不存在"}
+    effective_plan_name = _as_text(arguments.get("plan_name") or current_plan.get("plan_name"))
+    effective_schedule_type = _as_text(schedule_type or current_plan.get("schedule_type"))
+    effective_input_bindings = (
+        [v for v in _safe_list(arguments.get("input_bindings_json")) if isinstance(v, dict)]
+        if arguments.get("input_bindings_json") is not None
+        else [v for v in _safe_list(current_plan.get("input_bindings_json")) if isinstance(v, dict)]
+    )
+    effective_plan_meta = (
+        _safe_dict(arguments.get("plan_meta_json"))
+        if arguments.get("plan_meta_json") is not None
+        else _safe_dict(current_plan.get("plan_meta_json"))
+    )
+    effective_is_enabled = (
+        _as_bool(arguments.get("is_enabled"), True)
+        if arguments.get("is_enabled") is not None
+        else bool(current_plan.get("is_enabled"))
+    )
+    plan_meta_json, rollup_error = _plan_meta_with_inferred_rollup(
+        plan_name=effective_plan_name,
+        schedule_type=effective_schedule_type,
+        plan_meta_json=effective_plan_meta,
+        scheme=scheme,
+        input_bindings_json=effective_input_bindings,
+        is_enabled=effective_is_enabled,
+    )
+    if rollup_error:
+        return {"success": False, "error": rollup_error}
     item = auth_db.update_execution_run_plan(
         company_id=company_id,
         plan_id=plan_id,
@@ -2599,7 +2680,7 @@ def _plan_update(arguments: dict[str, Any]) -> dict[str, Any]:
         input_bindings_json=arguments.get("input_bindings_json"),
         channel_config_id=_normalize_optional_uuid(arguments.get("channel_config_id")),
         owner_mapping_json=arguments.get("owner_mapping_json"),
-        plan_meta_json=arguments.get("plan_meta_json"),
+        plan_meta_json=plan_meta_json,
         is_enabled=arguments.get("is_enabled"),
     )
     if not item:

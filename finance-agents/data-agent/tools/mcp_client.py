@@ -57,6 +57,8 @@ def _get_result_wait_timeout(tool_name: str) -> float:
         return 600.0
     if tool_name == "recon_execute":
         return 600.0
+    if tool_name == "recon_diff_digestion":
+        return 600.0
     return _RESULT_WAIT_TIMEOUT
 
 # ===========================================================================

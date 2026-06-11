@@ -42,6 +42,7 @@ function triggerModeLabel(triggerMode: string) {
   if (normalized === 'cron') return '自动';
   if (normalized === 'rerun') return '重跑';
   if (normalized === 'verify') return '验证';
+  if (normalized === 'resolve') return '差异消化';
   return triggerMode || '未知';
 }
 
@@ -51,7 +52,25 @@ function triggerModeBadge(triggerMode: string) {
   if (normalized === 'cron') return 'border-sky-200 bg-sky-50 text-sky-700';
   if (normalized === 'rerun') return 'border-amber-200 bg-amber-50 text-amber-700';
   if (normalized === 'verify') return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+  if (normalized === 'resolve') return 'border-emerald-200 bg-emerald-50 text-emerald-700';
   return 'border-border bg-surface-secondary text-text-secondary';
+}
+
+function formatReviewRound(value: number | undefined) {
+  return value && value > 0 ? `第 ${value} 轮` : '--';
+}
+
+function formatDateTime(value: string | undefined) {
+  if (!value) return '--';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function isClosedHandlingStatus(status: string) {
@@ -101,6 +120,7 @@ export default function ReconAutoRunsPanel({
               <th className="px-4 py-3 font-medium">执行状态</th>
               <th className="px-4 py-3 font-medium">数据就绪</th>
               <th className="px-4 py-3 font-medium">异常数</th>
+              <th className="px-4 py-3 font-medium">复核</th>
               <th className="px-4 py-3 font-medium">闭环状态</th>
               <th className="px-4 py-3 font-medium">开始 / 完成</th>
               <th className="px-4 py-3 font-medium">
@@ -111,7 +131,7 @@ export default function ReconAutoRunsPanel({
           <tbody>
             {loadingRuns ? (
               <tr className="border-t border-border-subtle text-text-secondary">
-                <td className="px-4 py-8 text-center" colSpan={8}>
+                <td className="px-4 py-8 text-center" colSpan={9}>
                   正在加载运行记录...
                 </td>
               </tr>
@@ -152,6 +172,10 @@ export default function ReconAutoRunsPanel({
                     </td>
                     <td className="px-4 py-3 text-text-secondary">{run.dataReady}</td>
                     <td className="px-4 py-3 text-text-secondary">{run.exceptionCount}</td>
+                    <td className="px-4 py-3 text-text-secondary">
+                      <div>{formatReviewRound(run.reviewRound)}</div>
+                      <div className="mt-1 text-xs">{formatDateTime(run.lastResolvedAt)}</div>
+                    </td>
                     <td className="px-4 py-3 text-text-secondary">{run.closureStatus}</td>
                     <td className="px-4 py-3 text-xs text-text-secondary">
                       <div>{run.startedAt}</div>
@@ -180,7 +204,7 @@ export default function ReconAutoRunsPanel({
                           className="inline-flex items-center gap-1 rounded-lg border border-sky-200 px-2.5 py-1.5 text-xs text-sky-700 transition-colors hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-70"
                         >
                           <RefreshCw className={cn('h-3.5 w-3.5', verifyRunId === run.id && 'animate-spin')} />
-                          {verifyRunId === run.id ? '验证中...' : '重新对账验证'}
+                          {verifyRunId === run.id ? '复核中...' : '差异消化'}
                         </button>
                       </div>
                     </td>
@@ -189,7 +213,7 @@ export default function ReconAutoRunsPanel({
               })
             ) : (
               <tr className="border-t border-border-subtle text-text-secondary">
-                <td className="px-4 py-8 text-center" colSpan={8}>
+                <td className="px-4 py-8 text-center" colSpan={9}>
                   {emptyRunsText}
                 </td>
               </tr>
@@ -212,7 +236,7 @@ export default function ReconAutoRunsPanel({
             </div>
           </div>
 
-          <div className="mt-4 grid gap-3 md:grid-cols-5">
+          <div className="mt-4 grid gap-3 md:grid-cols-6">
             <div className="rounded-xl border border-border bg-surface-secondary px-3 py-3">
               <div className="text-xs text-text-muted">执行状态</div>
               <div className="mt-1 text-sm font-medium text-text-primary">{statusLabel(focusedRun.status)}</div>
@@ -228,6 +252,11 @@ export default function ReconAutoRunsPanel({
             <div className="rounded-xl border border-border bg-surface-secondary px-3 py-3">
               <div className="text-xs text-text-muted">触发方式</div>
               <div className="mt-1 text-sm font-medium text-text-primary">{triggerModeLabel(focusedRun.triggerMode)}</div>
+            </div>
+            <div className="rounded-xl border border-border bg-surface-secondary px-3 py-3">
+              <div className="text-xs text-text-muted">复核轮次</div>
+              <div className="mt-1 text-sm font-medium text-text-primary">{formatReviewRound(focusedRun.reviewRound)}</div>
+              <div className="mt-0.5 text-xs text-text-secondary">{formatDateTime(focusedRun.lastResolvedAt)}</div>
             </div>
             <div className="rounded-xl border border-border bg-surface-secondary px-3 py-3">
               <div className="text-xs text-text-muted">开始 / 完成</div>

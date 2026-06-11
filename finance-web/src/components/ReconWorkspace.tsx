@@ -317,7 +317,9 @@ const SCHEME_LIST_TEMPLATE =
 const TASK_LIST_TEMPLATE =
   'minmax(260px,1.7fr) minmax(360px,2.2fr) minmax(140px,0.75fr) minmax(96px,0.45fr) minmax(240px,auto)';
 const RUN_LIST_TEMPLATE =
-  'minmax(0,2.7fr) minmax(150px,0.9fr) minmax(120px,0.7fr) minmax(120px,0.7fr) minmax(270px,auto)';
+  'minmax(0,2.4fr) minmax(150px,0.8fr) minmax(100px,0.55fr) minmax(120px,0.65fr) minmax(120px,0.65fr) minmax(270px,auto)';
+const DIFF_DIGESTION_POLL_ATTEMPTS = 12;
+const DIFF_DIGESTION_POLL_INTERVAL_MS = 2000;
 
 const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
   biz_key: '业务主键',
@@ -466,6 +468,12 @@ function toInt(value: unknown, fallback = 0): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function toBool(value: unknown, fallback = false): boolean {
@@ -752,6 +760,27 @@ function toSortableTimestamp(value: string): number {
   if (!value) return 0;
   const timestamp = new Date(value).getTime();
   return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function getOpenDiffCount(run: ReconCenterRunItem): number {
+  const summary = asRecord(run.raw.recon_result_summary_json);
+  const sourceOnly = toInt(summary.source_only, 0);
+  const targetOnly = toInt(summary.target_only, 0);
+  const matchedWithDiff = toInt(summary.matched_with_diff, 0);
+  const openDiffCount = sourceOnly + targetOnly + matchedWithDiff;
+  return openDiffCount > 0 ? openDiffCount : Math.max(0, run.anomalyCount);
+}
+
+function getDiffDigestionErrorMessage(data: unknown, fallback = '差异消化失败'): string {
+  const payload = asRecord(data);
+  const detail = payload.detail;
+  if (typeof detail === 'object' && detail !== null) {
+    const detailRecord = asRecord(detail);
+    const message = toText(detailRecord.message) || toText(detailRecord.error) || fallback;
+    const todo = toText(detailRecord.todo);
+    return todo ? `${message}：${todo}` : message;
+  }
+  return String(detail || payload.message || fallback);
 }
 
 function buildDefaultReconRuleName(schemeName: string): string {
@@ -1064,6 +1093,9 @@ function mapRun(
     triggerType: toText(runContext.trigger_type, toText(raw.trigger_type)),
     entryMode: toText(raw.entry_mode),
     anomalyCount: toInt(raw.anomaly_count, 0),
+    reviewRound: toInt(raw.review_round, 0),
+    lastResolvedAt: toText(raw.last_resolved_at),
+    resolutionSummary: asRecord(raw.resolution_summary_json),
     dataDate,
     failedStage: toText(raw.failed_stage),
     failedReason: toText(raw.failed_reason),
@@ -1089,53 +1121,6 @@ function mapRunException(item: unknown): ReconRunExceptionDetail {
     updatedAt: toText(raw.updated_at),
     raw,
   };
-}
-
-function getRunContext(item: ReconCenterRunItem): Record<string, unknown> {
-  return asRecord(item.raw.run_context_json);
-}
-
-function isRerunTrigger(item: ReconCenterRunItem): boolean {
-  return item.triggerType.trim().toLowerCase() === 'rerun';
-}
-
-function findRerunRun(
-  refreshedRuns: ReconCenterRunItem[],
-  originalRun: ReconCenterRunItem,
-  rerunRequestedAt: number,
-  existingRunIds: Set<string>,
-): ReconCenterRunItem | null {
-  const newestFirst = [...refreshedRuns].sort((left, right) => {
-    const leftTimestamp = Math.max(
-      toSortableTimestamp(toText(left.raw.created_at)),
-      toSortableTimestamp(left.startedAt),
-    );
-    const rightTimestamp = Math.max(
-      toSortableTimestamp(toText(right.raw.created_at)),
-      toSortableTimestamp(right.startedAt),
-    );
-    return rightTimestamp - leftTimestamp;
-  });
-  const directMatch = newestFirst.find((item) => (
-    isRerunTrigger(item)
-    && toText(getRunContext(item).rerun_from_run_id) === originalRun.id
-    && !existingRunIds.has(item.id)
-  ));
-  if (directMatch) return directMatch;
-
-  return newestFirst.find((item) => {
-    const runTimestamp = Math.max(
-      toSortableTimestamp(toText(item.raw.created_at)),
-      toSortableTimestamp(item.startedAt),
-    );
-    return (
-      isRerunTrigger(item)
-      && item.planCode === originalRun.planCode
-      && item.id !== originalRun.id
-      && !existingRunIds.has(item.id)
-      && runTimestamp >= rerunRequestedAt
-    );
-  }) || null;
 }
 
 function firstNonEmptyRecord(...values: unknown[]): Record<string, unknown> {
@@ -3128,7 +3113,7 @@ export default function ReconWorkspace({
   const [loadingExceptionsRunId, setLoadingExceptionsRunId] = useState<string | null>(null);
   const [centerError, setCenterError] = useState<string | null>(null);
   const [centerNotice, setCenterNotice] = useState<string | null>(null);
-  const [rerunNotice, setRerunNotice] = useState<{
+  const [diffDigestionNotice, setDiffDigestionNotice] = useState<{
     message: string;
     runId?: string;
   } | null>(null);
@@ -3170,7 +3155,7 @@ export default function ReconWorkspace({
   const [wizardProcJsonView, setWizardProcJsonView] = useState<'proc' | 'inputPlan'>('proc');
   const [wizardReconJsonView, setWizardReconJsonView] = useState<'proc' | 'recon'>('recon');
   const [procTrialPreview, setProcTrialPreview] = useState<ProcTrialPreview | null>(null);
-  const [rerunningRunId, setRerunningRunId] = useState<string | null>(null);
+  const [digestingRunId, setDigestingRunId] = useState<string | null>(null);
   const [selectedExceptionDetail, setSelectedExceptionDetail] = useState<ReconRunExceptionDetail | null>(null);
   const [wizardJsonCopyState, setWizardJsonCopyState] = useState<{
     panel: 'proc' | 'inputPlan' | 'recon';
@@ -3550,6 +3535,23 @@ export default function ReconWorkspace({
     } finally {
       setRunsPageLoading(false);
     }
+  }, [authToken, schemes, tasks]);
+
+  const refreshRunQuietly = useCallback(async (runId: string): Promise<ReconCenterRunItem | null> => {
+    if (!authToken) return null;
+    const headers = { Authorization: `Bearer ${authToken}` };
+    const response = await fetchReconAutoApi(`/runs/${encodeURIComponent(runId)}`, { headers });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(String(data.detail || data.message || '运行记录加载失败'));
+    }
+    const rawRun = asRecord(data).run || data;
+    const schemeNameByCode = new Map(schemes.map((item) => [item.schemeCode, item.name]));
+    const taskNameByCode = new Map(tasks.map((item) => [item.planCode, item.name]));
+    const nextRun = mapRun(rawRun, schemeNameByCode, taskNameByCode);
+    if (!nextRun.id) return null;
+    setRuns((prev) => prev.map((item) => (item.id === nextRun.id ? nextRun : item)));
+    return nextRun;
   }, [authToken, schemes, tasks]);
 
   const loadSchemesPage = useCallback(async (nextPage: number): Promise<void> => {
@@ -5273,7 +5275,7 @@ export default function ReconWorkspace({
       try {
         setCenterError(null);
         setCenterNotice(null);
-        setRerunNotice(null);
+        setDiffDigestionNotice(null);
         const response = await fetchReconAutoApi(`/schemes/${encodeURIComponent(scheme.id)}`, {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${authToken}` },
@@ -5362,7 +5364,7 @@ export default function ReconWorkspace({
       try {
         setCenterError(null);
         setCenterNotice(null);
-        setRerunNotice(null);
+        setDiffDigestionNotice(null);
         const response = await fetchReconAutoApi(`/runs/${encodeURIComponent(run.id)}`, {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${authToken}` },
@@ -5431,13 +5433,13 @@ export default function ReconWorkspace({
     [authToken],
   );
 
-  const handleRerunValidation = useCallback(
+  const handleDiffDigestion = useCallback(
     async (originalRunId: string) => {
       if (!authToken) {
-        setCenterError('请先登录后再重新对账验证。');
+        setCenterError('请先登录后再进行差异消化。');
         return;
       }
-      if (rerunningRunId) {
+      if (digestingRunId) {
         return;
       }
       const originalRun = runs.find((item) => item.id === originalRunId);
@@ -5445,76 +5447,96 @@ export default function ReconWorkspace({
         setCenterError('未找到原运行记录，请刷新运行记录后重试。');
         return;
       }
-      const rerunRequestedAt = Date.now();
-      const existingRunIds = new Set(runs.map((item) => item.id));
-      setRerunningRunId(originalRunId);
+      const originalReviewRound = originalRun.reviewRound;
+      const originalOpenDiffCount = getOpenDiffCount(originalRun);
+      setDigestingRunId(originalRunId);
       setCenterError(null);
       setCenterNotice(null);
-      setRerunNotice(null);
+      setDiffDigestionNotice(null);
       setModalError(null);
       try {
-        const response = await fetchReconAutoApi('/runs/rerun', {
+        const response = await fetchReconAutoApi(`/runs/${encodeURIComponent(originalRunId)}/diff-digestion`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${authToken}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            original_run_id: originalRunId,
-            reason: '前端按运行记录重新对账',
-          }),
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
-          const detail = data.detail;
-          if (typeof detail === 'object' && detail !== null) {
-            const message = toText(detail.message) || toText(detail.error) || '重新对账验证失败';
-            const todo = toText(detail.todo);
-            throw new Error(todo ? `${message}：${todo}` : message);
-          }
-          throw new Error(String(detail || data.message || '重新对账验证失败'));
+          throw new Error(getDiffDigestionErrorMessage(data));
         }
-        const refreshedRuns = await loadCenterData();
-        const rerunRun = findRerunRun(refreshedRuns, originalRun, rerunRequestedAt, existingRunIds);
+
+        let updatedRun: ReconCenterRunItem | null = null;
+        for (let attempt = 0; attempt < DIFF_DIGESTION_POLL_ATTEMPTS; attempt += 1) {
+          if (attempt > 0) {
+            await delay(DIFF_DIGESTION_POLL_INTERVAL_MS);
+          }
+          const refreshedRun = await refreshRunQuietly(originalRunId);
+          if (!refreshedRun) {
+            continue;
+          }
+          if (
+            refreshedRun.reviewRound > originalReviewRound
+            || getOpenDiffCount(refreshedRun) !== originalOpenDiffCount
+          ) {
+            updatedRun = refreshedRun;
+            break;
+          }
+        }
+
         setActiveTab('runs');
-        if (rerunRun) {
-          setFocusedRunId(rerunRun.id);
-          setRerunNotice({
-            message: '已发起重新对账，并新增运行记录。',
-            runId: rerunRun.id,
+        setFocusedRunId(originalRunId);
+        if (updatedRun) {
+          setDiffDigestionNotice({
+            message: `差异消化完成，当前待处理差异 ${formatCount(getOpenDiffCount(updatedRun))} 条，复核轮次 ${updatedRun.reviewRound}。`,
+            runId: updatedRun.id,
           });
+          setModalState((current) => (
+            current?.kind === 'run-exceptions' && current.run.id === originalRunId
+              ? { ...current, run: updatedRun }
+              : current
+          ));
+          setExceptionsByRunId((prev) => {
+            if (!prev[originalRunId]) return prev;
+            const next = { ...prev };
+            delete next[originalRunId];
+            return next;
+          });
+          void loadRunExceptions(originalRunId);
         } else {
-          setRerunNotice({
-            message: '已发起重新对账，系统正在生成新的运行记录，请稍后刷新运行记录查看。',
+          setDiffDigestionNotice({
+            message: '已发起差异消化，系统正在复核，请稍后刷新运行记录查看。',
+            runId: originalRunId,
           });
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : '重新对账验证失败';
+        const message = error instanceof Error ? error.message : '差异消化失败';
         setCenterError(message);
         setModalError(message);
-      } finally {
-        setRerunningRunId((prev) => (prev === originalRunId ? null : prev));
-      }
-    },
-    [authToken, loadCenterData, rerunningRunId, runs],
+    } finally {
+      setDigestingRunId((prev) => (prev === originalRunId ? null : prev));
+    }
+  },
+    [authToken, digestingRunId, loadRunExceptions, refreshRunQuietly, runs],
   );
 
-  const handleOpenRerunRun = useCallback((runId: string) => {
+  const handleOpenDiffDigestionRun = useCallback((runId: string) => {
     setSelectedExceptionDetail(null);
     closeModal();
     setActiveTab('runs');
     setFocusedRunId(runId);
   }, [closeModal]);
 
-  const renderRerunNotice = useCallback(() => {
-    if (!rerunNotice) return null;
+  const renderDiffDigestionNotice = useCallback(() => {
+    if (!diffDigestionNotice) return null;
     return (
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-        <span>{rerunNotice.message}</span>
-        {rerunNotice.runId ? (
+        <span>{diffDigestionNotice.message}</span>
+        {diffDigestionNotice.runId ? (
           <button
             type="button"
-            onClick={() => handleOpenRerunRun(rerunNotice.runId || '')}
+            onClick={() => handleOpenDiffDigestionRun(diffDigestionNotice.runId || '')}
             className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-surface px-3 py-1.5 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100"
           >
             前往查看
@@ -5522,7 +5544,7 @@ export default function ReconWorkspace({
         ) : null}
       </div>
     );
-  }, [handleOpenRerunRun, rerunNotice]);
+  }, [diffDigestionNotice, handleOpenDiffDigestionRun]);
 
   const schemeStepOneReady = Boolean(schemeDraft.name.trim());
   const aiProcGenerationBusy =
@@ -6012,7 +6034,7 @@ export default function ReconWorkspace({
     <div className="overflow-x-auto rounded-[26px] border border-border bg-surface shadow-sm">
       <div className="min-w-[1080px]">
         <ListHeader
-          columns={['运行任务', '运行时间', '异常数', '状态', '操作']}
+          columns={['运行任务', '运行时间', '异常数', '复核', '状态', '操作']}
           template={RUN_LIST_TEMPLATE}
         />
         {runs.map((item) => {
@@ -6040,6 +6062,11 @@ export default function ReconWorkspace({
               </div>
               <span className="text-sm text-text-secondary">{formatDateTime(item.startedAt)}</span>
               <span className="text-sm text-text-secondary">{item.anomalyCount}</span>
+              <span className="text-sm text-text-secondary">
+                {item.reviewRound > 0
+                  ? `第 ${item.reviewRound} 轮`
+                  : '--'}
+              </span>
               <span
                 className={cn(
                   'justify-self-start rounded-full border px-2.5 py-1 text-xs font-medium',
@@ -6929,12 +6956,12 @@ export default function ReconWorkspace({
             <h3 id="recon-center-modal-title" className="text-lg font-semibold text-text-primary">{run.planName}</h3>
             <button
               type="button"
-              onClick={() => void handleRerunValidation(run.id)}
-              disabled={Boolean(rerunningRunId)}
+              onClick={() => void handleDiffDigestion(run.id)}
+              disabled={Boolean(digestingRunId)}
               className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              <RefreshCw className={cn('h-4 w-4', rerunningRunId === run.id && 'animate-spin')} />
-              {rerunningRunId === run.id ? '验证中...' : '重新对账验证'}
+              <RefreshCw className={cn('h-4 w-4', digestingRunId === run.id && 'animate-spin')} />
+              {digestingRunId === run.id ? '复核中...' : '差异消化'}
             </button>
           </div>
         </div>
@@ -6944,7 +6971,7 @@ export default function ReconWorkspace({
               {modalError}
             </div>
           ) : null}
-          {renderRerunNotice()}
+          {renderDiffDigestionNotice()}
           <div className="flex flex-wrap gap-3">
             {renderRuntimeMetric('对账数据日期', runtimeSummary.bizDate || run.dataDate || '--')}
             {runtimeSummary.collectionMetrics.map((item, index) => renderRuntimeMetric(
@@ -6958,6 +6985,8 @@ export default function ReconWorkspace({
               `preparation-${item.side || item.businessName}-${index}`,
             ))}
             {renderRuntimeMetric('对账耗时', formatDuration(runtimeSummary.reconciliationDurationSeconds))}
+            {renderRuntimeMetric('复核轮次', run.reviewRound > 0 ? `第 ${run.reviewRound} 轮` : '--')}
+            {renderRuntimeMetric('上次消化时间', formatDateTime(run.lastResolvedAt, { includeSeconds: true }))}
           </div>
 
           <div className="rounded-2xl border border-border bg-surface-secondary">
@@ -7126,7 +7155,7 @@ export default function ReconWorkspace({
             </div>
           ) : null}
 
-          {renderRerunNotice()}
+          {renderDiffDigestionNotice()}
 
           {activeTab === 'subscriptions' ? (
             <DigestSubscriptionsPanel authToken={authToken} />

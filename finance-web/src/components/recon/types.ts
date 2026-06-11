@@ -42,6 +42,9 @@ export interface ReconRunItem {
   status: 'success' | 'running' | 'warning' | 'failed';
   dataReady: string;
   exceptionCount: number;
+  reviewRound?: number;
+  lastResolvedAt?: string;
+  resolutionSummary?: Record<string, unknown>;
   closureStatus: string;
   startedAt: string;
   finishedAt: string;
@@ -104,6 +107,9 @@ export interface ReconCenterRunItem {
   triggerType: string;
   entryMode: string;
   anomalyCount: number;
+  reviewRound: number;
+  lastResolvedAt: string;
+  resolutionSummary: Record<string, unknown>;
   dataDate: string;
   failedStage: string;
   failedReason: string;
@@ -171,6 +177,9 @@ export interface ReconCenterRunItem {
   triggerType: string;
   entryMode: string;
   anomalyCount: number;
+  reviewRound: number;
+  lastResolvedAt: string;
+  resolutionSummary: Record<string, unknown>;
   dataDate: string;
   failedStage: string;
   failedReason: string;
