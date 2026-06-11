@@ -135,6 +135,26 @@ async def test_preview_refresh_updates_dataset_meta_preview_sample(monkeypatch):
     assert updated_meta["preview_sample"]["order_field"] == "updated_at"
 
 
+@pytest.mark.anyio
+async def test_dataset_detail_requires_dataset_identifier(monkeypatch):
+    def fail_list_fallback(**kwargs):
+        raise AssertionError("dataset detail must not fall back to the first dataset")
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(data_sources.auth_db, "get_unified_data_source_by_id", lambda **kwargs: _source())
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_data_source_datasets", fail_list_fallback)
+
+    result = await data_sources._handle_data_source_get_dataset_detail(
+        {
+            "auth_token": "token",
+            "source_id": "source-db-1",
+        }
+    )
+
+    assert result["success"] is False
+    assert "数据集标识" in result["error"]
+
+
 def test_dataset_detail_tool_is_registered_and_routed():
     tool_names = {tool.name for tool in data_sources.create_tools()}
     assert "data_source_get_dataset_detail" in tool_names

@@ -5601,7 +5601,7 @@ def create_tools() -> list[Tool]:
                     "sample_limit": {"type": "integer"},
                     "refresh": {"type": "boolean"},
                 },
-                "required": ["auth_token", "source_id"],
+                "required": ["auth_token", "source_id", "dataset_id"],
             },
         ),
         Tool(
@@ -9662,6 +9662,12 @@ async def _handle_data_source_get_dataset_detail(arguments: dict[str, Any]) -> d
     source_row = auth_db.get_unified_data_source_by_id(company_id=company_id, data_source_id=source_id)
     if not source_row:
         return {"success": False, "error": "数据源不存在"}
+
+    dataset_id = _dataset_id_from_args(arguments)
+    dataset_code = _sanitize_dataset_code(arguments.get("dataset_code"))
+    resource_key = _safe_text(arguments.get("resource_key"))
+    if not dataset_id and not dataset_code and not resource_key:
+        return {"success": False, "error": "缺少数据集标识"}
 
     dataset_row = _resolve_dataset_row(company_id=company_id, arguments=arguments)
     if not dataset_row:
