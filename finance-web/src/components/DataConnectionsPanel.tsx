@@ -46,6 +46,7 @@ import type {
   DataSourceEventSummary,
   DataSourceKind,
   DataSourceListItem,
+  DataSourcePreviewSample,
   PlatformConnectionSummary,
   PlatformCode,
   ShopConnection,
@@ -1749,6 +1750,7 @@ function normalizeDataset(raw: unknown): DataSourceDatasetSummary | null {
     schema_summary: asRecord(value.schema_summary) ?? undefined,
     sync_strategy: asRecord(value.sync_strategy) ?? undefined,
     meta: asRecord(value.meta) ?? asRecord(value.metadata) ?? undefined,
+    preview_sample: (asRecord(value.preview_sample) ?? asRecord(asRecord(value.meta)?.preview_sample) ?? asRecord(asRecord(value.metadata)?.preview_sample) ?? undefined) as DataSourcePreviewSample | undefined,
     source: asRecord(value.source)
       ? {
           id: asString(asRecord(value.source)?.id),

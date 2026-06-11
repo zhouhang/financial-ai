@@ -1,5 +1,9 @@
 import type { DataSourceKind } from '../../types';
-import { extractCollectionDetailSampleRows } from './datasetPreview';
+import {
+  buildDatasetPreviewRequestBody,
+  extractDatasetPreviewRows,
+  extractPreviewSampleRows,
+} from './datasetPreview';
 import {
   createOutputFieldDraft,
   inferOutputFieldSemanticRole,
@@ -46,6 +50,8 @@ export interface RuleGenerationSourceOption {
   datasetKind?: string;
   schemaSummary?: Record<string, unknown>;
   extractConfig?: Record<string, unknown>;
+  sampleRows?: Record<string, unknown>[];
+  meta?: Record<string, unknown>;
 }
 
 export interface RuleGenerationEventDraftUpdate {
@@ -425,19 +431,31 @@ export async function fetchRuleGenerationSampleRows(
   if (!authToken || !source.sourceId || !source.id) {
     return [];
   }
+  const cachedRows = extractPreviewSampleRows(source, RULE_GENERATION_SAMPLE_ROW_LIMIT);
+  if (cachedRows.length > 0) {
+    return toPreviewTableRows(cachedRows).slice(0, RULE_GENERATION_SAMPLE_ROW_LIMIT);
+  }
   try {
-    const params = new URLSearchParams({
-      resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
-      limit: '1',
-      sample_limit: String(RULE_GENERATION_SAMPLE_ROW_LIMIT),
-    });
     const response = await fetch(
-      `/api/data-sources/${encodeURIComponent(source.sourceId)}/datasets/${encodeURIComponent(source.id)}/collection-detail?${params.toString()}`,
-      { headers: { Authorization: `Bearer ${authToken}` } },
+      `/api/data-sources/${encodeURIComponent(source.sourceId)}/preview`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(
+          buildDatasetPreviewRequestBody({
+            datasetId: source.id,
+            resourceKey: source.resourceKey || source.datasetCode || source.technicalName || source.name,
+            limit: RULE_GENERATION_SAMPLE_ROW_LIMIT,
+          }),
+        ),
+      },
     );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) return [];
-    return toPreviewTableRows(extractCollectionDetailSampleRows(data, RULE_GENERATION_SAMPLE_ROW_LIMIT))
+    return toPreviewTableRows(extractDatasetPreviewRows(data, RULE_GENERATION_SAMPLE_ROW_LIMIT))
       .slice(0, RULE_GENERATION_SAMPLE_ROW_LIMIT);
   } catch {
     return [];
@@ -451,20 +469,34 @@ async function fetchRuleGenerationSourceMetadata(
   if (!authToken || !source.sourceId || !source.id) {
     return { sampleRows: [] };
   }
+  const cachedRows = extractPreviewSampleRows(source, RULE_GENERATION_SAMPLE_ROW_LIMIT);
+  if (cachedRows.length > 0) {
+    return {
+      sampleRows: toPreviewTableRows(cachedRows).slice(0, RULE_GENERATION_SAMPLE_ROW_LIMIT),
+    };
+  }
   try {
-    const params = new URLSearchParams({
-      resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
-      limit: '1',
-      sample_limit: String(RULE_GENERATION_SAMPLE_ROW_LIMIT),
-    });
     const response = await fetch(
-      `/api/data-sources/${encodeURIComponent(source.sourceId)}/datasets/${encodeURIComponent(source.id)}/collection-detail?${params.toString()}`,
-      { headers: { Authorization: `Bearer ${authToken}` } },
+      `/api/data-sources/${encodeURIComponent(source.sourceId)}/preview`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(
+          buildDatasetPreviewRequestBody({
+            datasetId: source.id,
+            resourceKey: source.resourceKey || source.datasetCode || source.technicalName || source.name,
+            limit: RULE_GENERATION_SAMPLE_ROW_LIMIT,
+          }),
+        ),
+      },
     );
     const data = await response.json().catch(() => ({}));
     if (!response.ok) return { sampleRows: [] };
     return {
-      sampleRows: toPreviewTableRows(extractCollectionDetailSampleRows(data, RULE_GENERATION_SAMPLE_ROW_LIMIT))
+      sampleRows: toPreviewTableRows(extractDatasetPreviewRows(data, RULE_GENERATION_SAMPLE_ROW_LIMIT))
         .slice(0, RULE_GENERATION_SAMPLE_ROW_LIMIT),
       fieldLabelMap: extractFieldLabelMapFromDataset(asRecord(data).dataset),
       schemaSummary: extractSchemaSummaryFromDataset(asRecord(data).dataset),

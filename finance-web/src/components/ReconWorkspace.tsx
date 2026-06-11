@@ -24,6 +24,7 @@ import type {
   UserTaskRule,
 } from '../types';
 import { fetchReconAutoApi } from './recon/autoApi';
+import { extractPreviewSampleRows } from './recon/datasetPreview';
 import {
   filterBrowserCollectionFieldItems,
   isBrowserCollectionTechnicalSchemaSummary,
@@ -146,6 +147,8 @@ interface SchemeSourceOption {
   datasetKind?: string;
   schemaSummary?: Record<string, unknown>;
   extractConfig?: Record<string, unknown>;
+  sampleRows?: Record<string, unknown>[];
+  sampleOrigin?: string;
 }
 
 interface SchemeSourceDraft {
@@ -1154,6 +1157,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
     const semanticProfile = asRecord(value.semantic_profile);
     const sourceRecord = asRecord(value.source);
     const explicitKeyFields = normalizeStringList(value.key_fields);
+    const previewRows = extractPreviewSampleRows(value, 10);
     return {
       id: toText(value.dataset_id, toText(value.id)),
       name: toText(value.dataset_name, toText(value.name, toText(value.table_name, '未命名数据'))),
@@ -1172,6 +1176,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
       datasetCode: toText(value.dataset_code),
       resourceKey: toText(value.resource_key),
       datasetKind: toText(value.dataset_kind),
+      ...(previewRows.length > 0 ? { sampleRows: previewRows, sampleOrigin: 'preview_sample' } : {}),
     };
   });
   const rightSources = rightRows.map((raw) => {
@@ -1179,6 +1184,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
     const semanticProfile = asRecord(value.semantic_profile);
     const sourceRecord = asRecord(value.source);
     const explicitKeyFields = normalizeStringList(value.key_fields);
+    const previewRows = extractPreviewSampleRows(value, 10);
     return {
       id: toText(value.dataset_id, toText(value.id)),
       name: toText(value.dataset_name, toText(value.name, toText(value.table_name, '未命名数据'))),
@@ -1197,6 +1203,7 @@ function extractSchemeMeta(item: ReconSchemeListItem): SchemeMetaSummary {
       datasetCode: toText(value.dataset_code),
       resourceKey: toText(value.resource_key),
       datasetKind: toText(value.dataset_kind),
+      ...(previewRows.length > 0 ? { sampleRows: previewRows, sampleOrigin: 'preview_sample' } : {}),
     };
   });
   const parsedReconConfig = parseReconRuleJsonConfig(reconRuleJson, {

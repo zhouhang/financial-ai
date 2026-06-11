@@ -24,6 +24,57 @@ function normalizeDetailRows(value: unknown): PreviewRow[] {
     .filter((item): item is PreviewRow => Boolean(item));
 }
 
+export function extractDatasetPreviewRows(data: unknown, maxRows = 10): PreviewRow[] {
+  const root = asRecord(data);
+  const nestedData = asRecord(root.data);
+  const previewSample = asRecord(root.preview_sample);
+  const nestedPreviewSample = asRecord(nestedData.preview_sample);
+  const candidateRows = [
+    previewSample.rows,
+    nestedPreviewSample.rows,
+    root.rows,
+    root.sample_rows,
+    nestedData.rows,
+    nestedData.sample_rows,
+  ];
+
+  for (const candidate of candidateRows) {
+    const rows = normalizeDetailRows(candidate);
+    if (rows.length > 0) return rows.slice(0, maxRows);
+  }
+  return [];
+}
+
+export function extractPreviewSampleRows(dataset: unknown, maxRows = 10): PreviewRow[] {
+  const root = asRecord(dataset);
+  const meta = asRecord(root.meta || root.metadata);
+  const candidates = [
+    asRecord(root.preview_sample).rows,
+    asRecord(meta.preview_sample).rows,
+  ];
+  for (const candidate of candidates) {
+    const rows = normalizeDetailRows(candidate);
+    if (rows.length > 0) return rows.slice(0, maxRows);
+  }
+  return [];
+}
+
+export function buildDatasetPreviewRequestBody({
+  datasetId,
+  resourceKey,
+  limit = 10,
+}: {
+  datasetId?: string;
+  resourceKey?: string;
+  limit?: number;
+}): Record<string, unknown> {
+  return {
+    ...(datasetId ? { dataset_id: datasetId } : {}),
+    ...(resourceKey ? { resource_key: resourceKey } : {}),
+    limit,
+  };
+}
+
 export function extractCollectionDetailSampleRows(data: unknown, maxRows = 5): PreviewRow[] {
   const root = asRecord(data);
   const nestedData = asRecord(root.data);

@@ -5,7 +5,11 @@ import {
   filterBrowserCollectionFieldItems,
   isBrowserCollectionTechnicalSchemaSummary,
 } from './browserCollectionSchema';
-import { extractCollectionDetailSampleRows } from './datasetPreview';
+import {
+  buildDatasetPreviewRequestBody,
+  extractDatasetPreviewRows,
+  extractPreviewSampleRows,
+} from './datasetPreview';
 import SchemeWizardOutputFieldEditor from './SchemeWizardOutputFieldEditor';
 import type { OutputFieldDraft } from './schemeWizardState';
 
@@ -76,6 +80,8 @@ export interface SchemeSourceOption {
   datasetKind?: string;
   schemaSummary?: Record<string, unknown>;
   extractConfig?: Record<string, unknown>;
+  sampleRows?: Record<string, unknown>[];
+  sampleOrigin?: string;
 }
 
 export interface ProcSampleRow {
@@ -475,6 +481,12 @@ export function normalizeCandidateDataset(
     datasetKind: toText(value.dataset_kind).trim(),
     schemaSummary: normalizedSchemaSummary,
     extractConfig,
+    ...(() => {
+      const previewRows = extractPreviewSampleRows(value, 10);
+      return previewRows.length > 0
+        ? { sampleRows: previewRows, sampleOrigin: 'preview_sample' as const }
+        : {};
+    })(),
   };
 }
 
@@ -811,20 +823,32 @@ function DatasetStructureCard({
         setPreview({ loading: false, error: authToken ? '' : '请先登录后查看样例数据。', rows: [] });
         return;
       }
+      if (Array.isArray(source.sampleRows) && source.sampleRows.length > 0) {
+        setPreview({ loading: false, error: '', rows: source.sampleRows.slice(0, RULE_GENERATION_SAMPLE_ROW_LIMIT) });
+        return;
+      }
       setPreview({ loading: true, error: '', rows: [] });
       try {
         const cacheKey = datasetStructureCacheKey(source, 'preview');
         let previewRequest = DATASET_PREVIEW_CACHE.get(cacheKey);
         if (!previewRequest) {
           previewRequest = (async () => {
-            const params = new URLSearchParams({
-              resource_key: source.resourceKey || source.datasetCode || source.technicalName || source.name,
-              limit: '1',
-              sample_limit: String(RULE_GENERATION_SAMPLE_ROW_LIMIT),
-            });
             const response = await fetch(
-              `/api/data-sources/${encodeURIComponent(source.sourceId)}/datasets/${encodeURIComponent(source.id)}/collection-detail?${params.toString()}`,
-              { headers: { Authorization: `Bearer ${authToken}` } },
+              `/api/data-sources/${encodeURIComponent(source.sourceId)}/preview`,
+              {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${authToken}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(
+                  buildDatasetPreviewRequestBody({
+                    datasetId: source.id,
+                    resourceKey: source.resourceKey || source.datasetCode || source.technicalName || source.name,
+                    limit: RULE_GENERATION_SAMPLE_ROW_LIMIT,
+                  }),
+                ),
+              },
             );
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
@@ -833,7 +857,7 @@ function DatasetStructureCard({
             return {
               loading: false,
               error: '',
-              rows: extractCollectionDetailSampleRows(data, RULE_GENERATION_SAMPLE_ROW_LIMIT),
+              rows: extractDatasetPreviewRows(data, RULE_GENERATION_SAMPLE_ROW_LIMIT),
             };
           })();
           DATASET_PREVIEW_CACHE.set(cacheKey, previewRequest);

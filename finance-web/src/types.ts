@@ -236,12 +236,26 @@ export interface DataSourceDatasetSummary {
   schema_summary?: Record<string, unknown>;
   sync_strategy?: Record<string, unknown>;
   meta?: Record<string, unknown>;
+  preview_sample?: DataSourcePreviewSample;
   source?: {
     id?: string;
     name?: string;
     source_kind?: DataSourceKind | string;
     provider_code?: string;
   };
+}
+
+export interface DataSourcePreviewSample {
+  rows?: Record<string, unknown>[];
+  limit?: number;
+  row_count?: number;
+  resource_key?: string;
+  fetched_at?: string;
+  source?: string;
+  order?: string;
+  order_field?: string;
+  error?: string;
+  error_at?: string;
 }
 
 export interface DataSourceEventSummary {
