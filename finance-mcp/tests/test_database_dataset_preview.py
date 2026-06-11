@@ -91,6 +91,57 @@ async def test_dataset_detail_returns_cached_preview_without_collection_jobs(mon
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("selector_key", "selector_value"),
+    [
+        ("resource_key", "public.orders"),
+        ("dataset_code", "public_orders"),
+    ],
+)
+async def test_dataset_detail_returns_cached_preview_by_non_id_selector(
+    monkeypatch,
+    selector_key: str,
+    selector_value: str,
+):
+    preview_sample = {
+        "rows": [{"id": 4, "updated_at": "2026-06-13"}],
+        "limit": 10,
+        "row_count": 1,
+        "resource_key": "public.orders",
+        "source": "dataset_discover",
+        "order": "date_field_desc",
+        "order_field": "updated_at",
+    }
+
+    def fail_id_lookup(**kwargs):
+        raise AssertionError("non-id selector must not use dataset_id lookup")
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(data_sources.auth_db, "get_unified_data_source_by_id", lambda **kwargs: _source())
+    monkeypatch.setattr(data_sources.auth_db, "get_unified_data_source_dataset_by_id", fail_id_lookup)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_source_datasets",
+        lambda **kwargs: [_dataset({"preview_sample": preview_sample})],
+    )
+
+    result = await data_sources._handle_data_source_get_dataset_detail(
+        {
+            "auth_token": "token",
+            "source_id": "source-db-1",
+            selector_key: selector_value,
+            "sample_limit": 10,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["rows"] == [{"id": 4, "updated_at": "2026-06-13"}]
+    assert result["preview_sample"]["order_field"] == "updated_at"
+    assert "jobs" not in result
+    assert "collection_status" not in result
+
+
+@pytest.mark.anyio
 async def test_preview_refresh_updates_dataset_meta_preview_sample(monkeypatch):
     updated_meta: dict[str, Any] = {}
 
@@ -179,6 +230,75 @@ async def test_dataset_detail_missing_dataset_id_does_not_fall_back(monkeypatch)
 
     assert result["success"] is False
     assert result["error"] == "数据集不存在"
+
+
+@pytest.mark.anyio
+async def test_discover_datasets_keeps_success_when_preview_refresh_fails(monkeypatch):
+    upserted_rows: list[dict[str, Any]] = []
+
+    class FakeConnector:
+        capabilities: list[str] = []
+
+        def discover_datasets(self, arguments: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "success": True,
+                "datasets": [
+                    {
+                        "dataset_code": "public_orders",
+                        "dataset_name": "Orders",
+                        "resource_key": "public.orders",
+                        "dataset_kind": "table",
+                        "origin_type": "discovered",
+                        "extract_config": {"schema": "public", "table": "orders"},
+                        "schema_summary": {"fields": [{"name": "id"}]},
+                        "sync_strategy": {},
+                        "status": "active",
+                        "is_enabled": True,
+                        "health_status": "healthy",
+                        "meta": {},
+                    }
+                ],
+                "scan_summary": {"table_count": 1},
+            }
+
+    def fake_upsert_dataset(**kwargs):
+        row = _dataset(dict(kwargs.get("meta") or {}))
+        row["dataset_code"] = kwargs["dataset_code"]
+        row["dataset_name"] = kwargs["dataset_name"]
+        row["resource_key"] = kwargs["resource_key"]
+        row["extract_config"] = dict(kwargs.get("extract_config") or {})
+        row["schema_summary"] = dict(kwargs.get("schema_summary") or {})
+        row["sync_strategy"] = dict(kwargs.get("sync_strategy") or {})
+        upserted_rows.append(row)
+        return row
+
+    def fail_preview_refresh(*args, **kwargs):
+        raise RuntimeError("preview unavailable")
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(data_sources.auth_db, "get_unified_data_source_by_id", lambda **kwargs: _source())
+    monkeypatch.setattr(data_sources, "_load_runtime_source", lambda source_row, include_secret: dict(source_row))
+    monkeypatch.setattr(data_sources, "build_connector", lambda runtime_source: FakeConnector())
+    monkeypatch.setattr(data_sources.auth_db, "upsert_unified_data_source_dataset", fake_upsert_dataset)
+    monkeypatch.setattr(data_sources.auth_db, "list_unified_data_source_datasets", lambda **kwargs: list(upserted_rows))
+    monkeypatch.setattr(data_sources.auth_db, "update_unified_data_source_health", lambda **kwargs: _source())
+    monkeypatch.setattr(data_sources, "_update_source_meta", lambda source_row, meta_updates: source_row)
+    monkeypatch.setattr(data_sources, "_build_data_source_view", lambda source_row, datasets: {"id": source_row["id"]})
+    monkeypatch.setattr(data_sources.auth_db, "create_unified_data_source_event", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources, "_refresh_database_preview_sample", fail_preview_refresh)
+
+    result = await data_sources._handle_data_source_discover_datasets(
+        {
+            "auth_token": "token",
+            "source_id": "source-db-1",
+            "persist": True,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["dataset_count"] == 1
+    assert result["datasets"][0]["resource_key"] == "public.orders"
+    assert len(upserted_rows) == 1
 
 
 def test_dataset_detail_tool_is_registered_and_routed():
