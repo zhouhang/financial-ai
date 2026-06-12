@@ -953,10 +953,15 @@ def append_execution_run_retry_history(
 
     result = dict(run_context or {})
     history = _safe_list(result.get("retry_history"))
+    resolved_reason = (
+        str(reason or "").strip()
+        or str(result.get("retry_reason") or "").strip()
+        or "用户触发重试"
+    )
     history.append(
         {
             "attempted_at": attempted.isoformat(),
-            "reason": str(reason or "").strip(),
+            "reason": resolved_reason,
             "trigger_user": _safe_dict(trigger_user),
             "previous_status": str(source_run.get("execution_status") or "").strip(),
             "previous_failed_stage": str(source_run.get("failed_stage") or "").strip(),

@@ -1344,6 +1344,11 @@ async def rerun_execution_run_api(
         trigger_mode="rerun",
         target_run_id=target_run_id,
     )
+    if active_result.get("success") is False:
+        raise HTTPException(
+            status_code=500,
+            detail=active_result.get("error", "查询重试队列状态失败"),
+        )
     if active_result.get("job") or active_result.get("found"):
         raise HTTPException(
             status_code=409,
@@ -1362,16 +1367,6 @@ async def rerun_execution_run_api(
         trigger_user=trigger_user,
     )
 
-    result = await recon_queue_enqueue(
-        company_id=str(user["company_id"]),
-        run_plan_code=str(prepare_result.get("run_plan_code") or ""),
-        biz_date=str(prepare_result.get("biz_date") or ""),
-        trigger_mode="rerun",
-        run_context=run_context,
-    )
-    if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
-
     update_result = await execution_run_update(
         auth_token,
         target_run_id,
@@ -1387,6 +1382,16 @@ async def rerun_execution_run_api(
     )
     if not update_result.get("success"):
         raise HTTPException(status_code=500, detail=update_result.get("error", "更新运行记录失败"))
+
+    result = await recon_queue_enqueue(
+        company_id=str(user["company_id"]),
+        run_plan_code=str(prepare_result.get("run_plan_code") or ""),
+        biz_date=str(prepare_result.get("biz_date") or ""),
+        trigger_mode="rerun",
+        run_context=run_context,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
 
     return {
         "queued": True,

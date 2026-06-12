@@ -117,3 +117,25 @@ def test_append_retry_history_keeps_latest_20() -> None:
     assert history[-1]["previous_failed_reason"] == "left dataset missing"
     assert history[-1]["trigger_user"]["username"] == "张三"
     assert history[0] == {"attempt": 6}
+
+
+def test_append_retry_history_uses_context_reason_then_default() -> None:
+    source_run = _source_run()
+
+    from_context = auto_run_service.append_execution_run_retry_history(
+        {"retry_reason": "上下文原因"},
+        source_run=source_run,
+        reason="",
+        trigger_user={"user_id": "u1"},
+        attempted_at=datetime(2026, 6, 12, 10, 30, tzinfo=timezone.utc),
+    )
+    assert from_context["retry_history"][-1]["reason"] == "上下文原因"
+
+    defaulted = auto_run_service.append_execution_run_retry_history(
+        {},
+        source_run=source_run,
+        reason="",
+        trigger_user={"user_id": "u1"},
+        attempted_at=datetime(2026, 6, 12, 10, 30, tzinfo=timezone.utc),
+    )
+    assert defaulted["retry_history"][-1]["reason"] == "用户触发重试"
