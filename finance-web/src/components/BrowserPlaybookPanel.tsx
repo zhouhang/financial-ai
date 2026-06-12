@@ -944,7 +944,9 @@ export function BrowserPlaybookPanel({
                         </span>
                       </td>
                       <td className="px-4 py-3 text-text-secondary">{statusLabel(row.status)}</td>
-                      <td className="px-4 py-3 text-text-secondary">{formatDateTime(row.updatedAt)}</td>
+                      <td className="px-4 py-3 text-text-secondary">
+                        {formatDateTime(row.taskUpdatedAt || row.updatedAt)}
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex min-w-[340px] items-center gap-2 whitespace-nowrap">
                           <button

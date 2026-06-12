@@ -222,11 +222,8 @@ def _query_source_payload(
             if _is_browser_collection(binding)
             else auth_db.list_dataset_collection_records
         )
+        # 普通异常详情必须呈现本次运行 cohort 的证据；跨 biz_date 补数由差异消化负责。
         rows = list_records(**common_kwargs)
-        if not rows and common_kwargs.get("biz_date"):
-            rows = list_records(**{**common_kwargs, "biz_date": None})
-        if not rows and common_kwargs.get("dataset_code"):
-            rows = list_records(**{**common_kwargs, "biz_date": None, "dataset_code": None})
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"[execution] 回查异常原始记录失败: field={source_field}, error={exc}")
         return {}

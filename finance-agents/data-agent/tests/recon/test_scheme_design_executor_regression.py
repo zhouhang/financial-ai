@@ -21,8 +21,13 @@ def _ensure_package(name: str, path: Path) -> types.ModuleType:
     return module
 
 
-_ensure_package("graphs.recon", RECON_DIR)
-_ensure_package("graphs.recon.scheme_design", SCHEME_DESIGN_DIR)
+_GRAPHS_PKG = _ensure_package("graphs", ROOT / "graphs")
+_RECON_PKG = _ensure_package("graphs.recon", RECON_DIR)
+_SCHEME_DESIGN_PKG = _ensure_package("graphs.recon.scheme_design", SCHEME_DESIGN_DIR)
+# 裸塞 sys.modules 不会建立父包属性链;后续测试用 monkeypatch.setattr("graphs.recon....")
+# 按属性逐级解析,缺了这两行会在本文件先运行时污染整个会话(AttributeError: no attribute 'recon')。
+setattr(_GRAPHS_PKG, "recon", _RECON_PKG)
+setattr(_RECON_PKG, "scheme_design", _SCHEME_DESIGN_PKG)
 
 executor_module = importlib.import_module("graphs.recon.scheme_design.executor")
 models_module = importlib.import_module("models")

@@ -14,13 +14,22 @@ from unittest.mock import AsyncMock
 
 import jwt
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 # ── 路径注入 ────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parents[2]  # finance-agents/data-agent
 RECON_DIR = ROOT / "graphs" / "recon"
+TESTS_DIR = ROOT / "tests"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+from _import_isolation import prefer_data_agent_imports
+
+prefer_data_agent_imports(__file__)
 
 
 def _ensure_package(name: str, path: Path) -> types.ModuleType:
@@ -50,6 +59,13 @@ def _auth_header() -> str:
     return f"Bearer {token}"
 
 
+@pytest.fixture
+def client() -> TestClient:
+    app = FastAPI()
+    app.include_router(auto_run_api.router, prefix="/api")
+    return TestClient(app)
+
+
 def _make_run(
     run_id: str = "run-abc",
     biz_date_in_run_context: str = "2026-06-01",
@@ -72,6 +88,22 @@ def _make_run(
         "run_context_json": run_context_json,
         "source_snapshot_json": source_snapshot_json,
         "execution_status": "success",
+    }
+
+
+def _make_execution_run_for_rerun(status: str = "failed") -> dict[str, object]:
+    return {
+        "id": "run-failed-1",
+        "plan_code": "plan-1",
+        "biz_date": "2026-06-10",
+        "execution_status": status,
+        "failed_stage": "recon",
+        "failed_reason": "原失败原因",
+        "finished_at": "2026-06-10T09:00:00+08:00",
+        "run_context_json": {
+            "biz_date": "2026-06-10",
+            "run_plan_code": "plan-1",
+        },
     }
 
 
@@ -299,3 +331,296 @@ def test_digest_run_diffs_api_returns_404_for_missing_run(
         )
 
     assert exc.value.status_code == 404
+
+
+def test_rerun_execution_run_rejects_active_duplicate(client, monkeypatch):
+    async def fake_prepare_execution_run_rerun(**kwargs):
+        return {
+            "success": True,
+            "run_plan_code": "plan-1",
+            "biz_date": "2026-06-10",
+            "source_run": _make_execution_run_for_rerun(),
+            "run_context": {
+                "target_run_id": "run-failed-1",
+                "execution_run_id": "run-failed-1",
+                "retry_from_failed_run_id": "run-failed-1",
+                "retry_reason": "用户触发重试",
+                "trigger_type": "rerun",
+            },
+        }
+
+    async def fake_recon_queue_find_active(**kwargs):
+        return {"success": True, "job": {"id": "job-1", "status": "queued"}}
+
+    async def fake_recon_queue_enqueue(**kwargs):
+        raise AssertionError("duplicate active retry must not enqueue")
+
+    monkeypatch.setattr(auto_run_api, "prepare_execution_run_rerun", fake_prepare_execution_run_rerun)
+    monkeypatch.setattr(auto_run_api, "recon_queue_find_active", fake_recon_queue_find_active)
+    monkeypatch.setattr(auto_run_api, "recon_queue_enqueue", fake_recon_queue_enqueue)
+
+    response = client.post(
+        "/api/recon/runs/rerun",
+        headers={"Authorization": _auth_header()},
+        json={"original_run_id": "run-failed-1", "reason": "用户触发重试"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["message"] == "该运行记录正在重试,请稍后"
+
+
+def test_rerun_execution_run_fails_closed_when_active_lookup_fails(client, monkeypatch):
+    enqueue_calls = []
+    update_calls = []
+
+    async def fake_prepare_execution_run_rerun(**kwargs):
+        return {
+            "success": True,
+            "run_plan_code": "plan-1",
+            "biz_date": "2026-06-10",
+            "source_run": _make_execution_run_for_rerun(),
+            "run_context": {
+                "target_run_id": "run-failed-1",
+                "execution_run_id": "run-failed-1",
+                "retry_from_failed_run_id": "run-failed-1",
+                "retry_reason": "用户触发重试",
+                "trigger_type": "rerun",
+            },
+        }
+
+    async def fake_recon_queue_find_active(**kwargs):
+        return {"success": False, "error": "queue lookup failed"}
+
+    async def fake_recon_queue_enqueue(**kwargs):
+        enqueue_calls.append(kwargs)
+        return {"success": True, "job": {"id": "job-1"}}
+
+    async def fake_execution_run_update(auth_token, run_id, payload):
+        update_calls.append(payload)
+        return {"success": True, "run": {"id": run_id}}
+
+    monkeypatch.setattr(auto_run_api, "prepare_execution_run_rerun", fake_prepare_execution_run_rerun)
+    monkeypatch.setattr(auto_run_api, "recon_queue_find_active", fake_recon_queue_find_active)
+    monkeypatch.setattr(auto_run_api, "recon_queue_enqueue", fake_recon_queue_enqueue)
+    monkeypatch.setattr(auto_run_api, "execution_run_update", fake_execution_run_update)
+
+    response = client.post(
+        "/api/recon/runs/rerun",
+        headers={"Authorization": _auth_header()},
+        json={"original_run_id": "run-failed-1", "reason": "用户触发重试"},
+    )
+
+    assert response.status_code == 500
+    assert "queue lookup failed" in str(response.json()["detail"])
+    assert enqueue_calls == []
+    assert update_calls == []
+
+
+def test_rerun_execution_run_update_failure_does_not_enqueue(client, monkeypatch):
+    enqueue_calls = []
+
+    async def fake_prepare_execution_run_rerun(**kwargs):
+        return {
+            "success": True,
+            "run_plan_code": "plan-1",
+            "biz_date": "2026-06-10",
+            "source_run": _make_execution_run_for_rerun(),
+            "run_context": {
+                "target_run_id": "run-failed-1",
+                "execution_run_id": "run-failed-1",
+                "retry_from_failed_run_id": "run-failed-1",
+                "retry_reason": "用户触发重试",
+                "trigger_type": "rerun",
+            },
+        }
+
+    async def fake_recon_queue_find_active(**kwargs):
+        return {"success": True, "job": None}
+
+    async def fake_execution_run_update(auth_token, run_id, payload):
+        return {"success": False, "error": "update failed"}
+
+    async def fake_recon_queue_enqueue(**kwargs):
+        enqueue_calls.append(kwargs)
+        return {"success": True, "job": {"id": "job-1"}}
+
+    monkeypatch.setattr(auto_run_api, "prepare_execution_run_rerun", fake_prepare_execution_run_rerun)
+    monkeypatch.setattr(auto_run_api, "recon_queue_find_active", fake_recon_queue_find_active)
+    monkeypatch.setattr(auto_run_api, "execution_run_update", fake_execution_run_update)
+    monkeypatch.setattr(auto_run_api, "recon_queue_enqueue", fake_recon_queue_enqueue)
+
+    response = client.post(
+        "/api/recon/runs/rerun",
+        headers={"Authorization": _auth_header()},
+        json={"original_run_id": "run-failed-1", "reason": "用户触发重试"},
+    )
+
+    assert response.status_code == 500
+    assert "update failed" in str(response.json()["detail"])
+    assert enqueue_calls == []
+
+
+def test_rerun_execution_run_marks_original_run_running(client, monkeypatch):
+    captured_enqueue = {}
+    captured_update = {}
+    call_order = []
+
+    async def fake_prepare_execution_run_rerun(**kwargs):
+        return {
+            "success": True,
+            "run_plan_code": "plan-1",
+            "biz_date": "2026-06-10",
+            "source_run": _make_execution_run_for_rerun(),
+            "run_context": {
+                "target_run_id": "run-failed-1",
+                "execution_run_id": "run-failed-1",
+                "retry_from_failed_run_id": "run-failed-1",
+                "retry_reason": "用户触发重试",
+                "trigger_type": "rerun",
+            },
+        }
+
+    async def fake_recon_queue_find_active(**kwargs):
+        return {"success": True, "job": None}
+
+    async def fake_recon_queue_enqueue(**kwargs):
+        call_order.append("enqueue")
+        captured_enqueue.update(kwargs)
+        return {"success": True, "job": {"id": "job-1", "status": "queued"}}
+
+    async def fake_execution_run_update(auth_token, run_id, payload):
+        call_order.append("update")
+        captured_update.update({"auth_token": auth_token, "run_id": run_id, "payload": payload})
+        return {"success": True, "run": {"id": run_id, "execution_status": "running"}}
+
+    monkeypatch.setattr(auto_run_api, "prepare_execution_run_rerun", fake_prepare_execution_run_rerun)
+    monkeypatch.setattr(auto_run_api, "recon_queue_find_active", fake_recon_queue_find_active)
+    monkeypatch.setattr(auto_run_api, "recon_queue_enqueue", fake_recon_queue_enqueue)
+    monkeypatch.setattr(auto_run_api, "execution_run_update", fake_execution_run_update)
+
+    response = client.post(
+        "/api/recon/runs/rerun",
+        headers={"Authorization": _auth_header()},
+        json={"original_run_id": "run-failed-1", "reason": "用户触发重试"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["queued"] is True
+    assert call_order == ["update", "enqueue"]
+    assert captured_enqueue["trigger_mode"] == "rerun"
+    assert captured_enqueue["run_context"]["target_run_id"] == "run-failed-1"
+    assert captured_enqueue["run_context"]["execution_run_id"] == "run-failed-1"
+    assert captured_update["run_id"] == "run-failed-1"
+    assert captured_update["payload"]["execution_status"] == "running"
+    assert captured_update["payload"]["failed_stage"] == ""
+    assert captured_update["payload"]["failed_reason"] == ""
+    assert captured_update["payload"]["restart_started_at_now"] is True
+    assert captured_update["payload"]["reset_finished_at"] is True
+    assert captured_update["payload"]["run_context_json"]["retry_history"][-1]["previous_status"] == "failed"
+
+
+def test_rerun_execution_run_enqueue_failure_restores_failed_state(client, monkeypatch):
+    update_calls = []
+
+    async def fake_prepare_execution_run_rerun(**kwargs):
+        source = _make_execution_run_for_rerun()
+        source["failed_stage"] = "recon"
+        source["failed_reason"] = "原失败原因"
+        return {
+            "success": True,
+            "run_plan_code": "plan-1",
+            "biz_date": "2026-06-10",
+            "source_run": source,
+            "run_context": {
+                "target_run_id": "run-failed-1",
+                "execution_run_id": "run-failed-1",
+                "retry_from_failed_run_id": "run-failed-1",
+                "retry_reason": "用户触发重试",
+                "trigger_type": "rerun",
+            },
+        }
+
+    async def fake_recon_queue_find_active(**kwargs):
+        return {"success": True, "job": None}
+
+    async def fake_execution_run_update(auth_token, run_id, payload):
+        update_calls.append(payload)
+        return {
+            "success": True,
+            "run": {"id": run_id, "execution_status": payload["execution_status"]},
+        }
+
+    async def fake_recon_queue_enqueue(**kwargs):
+        return {"success": False, "error": "enqueue failed"}
+
+    monkeypatch.setattr(auto_run_api, "prepare_execution_run_rerun", fake_prepare_execution_run_rerun)
+    monkeypatch.setattr(auto_run_api, "recon_queue_find_active", fake_recon_queue_find_active)
+    monkeypatch.setattr(auto_run_api, "execution_run_update", fake_execution_run_update)
+    monkeypatch.setattr(auto_run_api, "recon_queue_enqueue", fake_recon_queue_enqueue)
+
+    response = client.post(
+        "/api/recon/runs/rerun",
+        headers={"Authorization": _auth_header()},
+        json={"original_run_id": "run-failed-1", "reason": "用户触发重试"},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == {"message": "enqueue failed", "restore_error": ""}
+    assert len(update_calls) == 2
+    assert update_calls[0]["execution_status"] == "running"
+    assert update_calls[1]["execution_status"] == "failed"
+    assert update_calls[1]["failed_stage"] == "recon"
+    assert update_calls[1]["failed_reason"] == "原失败原因"
+    assert update_calls[1]["finished_at_now"] is True
+    assert update_calls[1]["run_context_json"]["retry_history"][-1]["previous_status"] == "failed"
+
+
+def test_rerun_execution_run_enqueue_failure_restore_uses_fallback_reason(
+    client,
+    monkeypatch,
+):
+    update_calls = []
+
+    async def fake_prepare_execution_run_rerun(**kwargs):
+        source = _make_execution_run_for_rerun()
+        source["failed_stage"] = ""
+        source["failed_reason"] = ""
+        return {
+            "success": True,
+            "run_plan_code": "plan-1",
+            "biz_date": "2026-06-10",
+            "source_run": source,
+            "run_context": {
+                "target_run_id": "run-failed-1",
+                "execution_run_id": "run-failed-1",
+                "retry_from_failed_run_id": "run-failed-1",
+                "retry_reason": "用户触发重试",
+                "trigger_type": "rerun",
+            },
+        }
+
+    async def fake_recon_queue_find_active(**kwargs):
+        return {"success": True, "job": None}
+
+    async def fake_execution_run_update(auth_token, run_id, payload):
+        update_calls.append(payload)
+        return {"success": True, "run": {"id": run_id}}
+
+    async def fake_recon_queue_enqueue(**kwargs):
+        return {"success": False, "error": "enqueue failed"}
+
+    monkeypatch.setattr(auto_run_api, "prepare_execution_run_rerun", fake_prepare_execution_run_rerun)
+    monkeypatch.setattr(auto_run_api, "recon_queue_find_active", fake_recon_queue_find_active)
+    monkeypatch.setattr(auto_run_api, "execution_run_update", fake_execution_run_update)
+    monkeypatch.setattr(auto_run_api, "recon_queue_enqueue", fake_recon_queue_enqueue)
+
+    response = client.post(
+        "/api/recon/runs/rerun",
+        headers={"Authorization": _auth_header()},
+        json={"original_run_id": "run-failed-1", "reason": "用户触发重试"},
+    )
+
+    assert response.status_code == 500
+    assert len(update_calls) == 2
+    assert update_calls[1]["failed_stage"] == "rerun_enqueue"
+    assert update_calls[1]["failed_reason"] == "enqueue failed"

@@ -25,6 +25,7 @@ import type {
 } from '../types';
 import { fetchReconAutoApi } from './recon/autoApi';
 import { extractPreviewSampleRows } from './recon/datasetPreview';
+import { canDigestRun, canRetryRun, isRunInProgress } from './recon/runActions';
 import {
   filterBrowserCollectionFieldItems,
   isBrowserCollectionTechnicalSchemaSummary,
@@ -320,9 +321,10 @@ const SCHEME_LIST_TEMPLATE =
 const TASK_LIST_TEMPLATE =
   'minmax(260px,1.7fr) minmax(360px,2.2fr) minmax(140px,0.75fr) minmax(96px,0.45fr) minmax(240px,auto)';
 const RUN_LIST_TEMPLATE =
-  'minmax(0,2.4fr) minmax(150px,0.8fr) minmax(100px,0.55fr) minmax(120px,0.65fr) minmax(120px,0.65fr) minmax(270px,auto)';
+  'minmax(0,2.4fr) minmax(150px,0.8fr) minmax(100px,0.55fr) minmax(120px,0.65fr) minmax(120px,0.65fr) minmax(210px,auto)';
 const DIFF_DIGESTION_POLL_ATTEMPTS = 12;
 const DIFF_DIGESTION_POLL_INTERVAL_MS = 2000;
+const RUN_RETRY_POLL_ATTEMPTS = 6;
 
 const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
   biz_key: '业务主键',
@@ -3163,6 +3165,7 @@ export default function ReconWorkspace({
   const [wizardReconJsonView, setWizardReconJsonView] = useState<'proc' | 'recon'>('recon');
   const [procTrialPreview, setProcTrialPreview] = useState<ProcTrialPreview | null>(null);
   const [digestingRunId, setDigestingRunId] = useState<string | null>(null);
+  const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
   const [selectedExceptionDetail, setSelectedExceptionDetail] = useState<ReconRunExceptionDetail | null>(null);
   const [wizardJsonCopyState, setWizardJsonCopyState] = useState<{
     panel: 'proc' | 'inputPlan' | 'recon';
@@ -5528,6 +5531,89 @@ export default function ReconWorkspace({
     [authToken, digestingRunId, loadRunExceptions, refreshRunQuietly, runs],
   );
 
+  const handleRetryRun = useCallback(
+    async (runId: string) => {
+      if (!authToken) {
+        setCenterError('请先登录后再重试运行记录。');
+        return;
+      }
+      setRetryingRunId(runId);
+      setCenterError(null);
+      setCenterNotice(null);
+      setModalError(null);
+      try {
+        const response = await fetchReconAutoApi('/runs/rerun', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ original_run_id: runId, reason: '用户触发重试' }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const detail = data?.detail;
+          const message =
+            typeof detail === 'string'
+              ? detail
+              : detail?.message || data?.message || data?.error || '发起重试失败';
+          throw new Error(message);
+        }
+        setCenterNotice('已发起重试,当前运行记录将更新为最新执行结果。');
+        let refreshedRun = await refreshRunQuietly(runId);
+        for (let attempt = 1; refreshedRun && isRunInProgress(refreshedRun) && attempt < RUN_RETRY_POLL_ATTEMPTS; attempt += 1) {
+          if (attempt > 1) {
+            await new Promise((resolve) => window.setTimeout(resolve, DIFF_DIGESTION_POLL_INTERVAL_MS));
+          }
+          refreshedRun = await refreshRunQuietly(runId);
+        }
+        await loadRunsPage(runsPage);
+        setModalState((current) => (
+          current?.kind === 'run-exceptions' && current.run.id === runId && refreshedRun
+            ? { ...current, run: refreshedRun }
+            : current
+        ));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '发起重试失败';
+        setCenterError(message);
+        setModalError(message);
+      } finally {
+        setRetryingRunId((current) => (current === runId ? null : current));
+      }
+    },
+    [authToken, loadRunsPage, refreshRunQuietly, runsPage],
+  );
+
+  const renderRunPrimaryActionButton = (run: ReconCenterRunItem) => {
+    if (canRetryRun(run)) {
+      return (
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={retryingRunId === run.id}
+          onClick={() => void handleRetryRun(run.id)}
+        >
+          <RefreshCw className={cn('h-4 w-4', retryingRunId === run.id && 'animate-spin')} />
+          {retryingRunId === run.id ? '重试中...' : '重试'}
+        </button>
+      );
+    }
+    if (canDigestRun(run)) {
+      return (
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={digestingRunId === run.id}
+          onClick={() => void handleDiffDigestion(run.id)}
+        >
+          <RefreshCw className={cn('h-4 w-4', digestingRunId === run.id && 'animate-spin')} />
+          {digestingRunId === run.id ? '复核中...' : '差异消化'}
+        </button>
+      );
+    }
+    return null;
+  };
+
   const handleOpenDiffDigestionRun = useCallback((runId: string) => {
     setSelectedExceptionDetail(null);
     closeModal();
@@ -6961,15 +7047,7 @@ export default function ReconWorkspace({
           <p className="text-xs font-semibold tracking-[0.14em] text-text-muted">异常看板</p>
           <div className="mt-1 flex flex-wrap items-center justify-between gap-3">
             <h3 id="recon-center-modal-title" className="text-lg font-semibold text-text-primary">{run.planName}</h3>
-            <button
-              type="button"
-              onClick={() => void handleDiffDigestion(run.id)}
-              disabled={Boolean(digestingRunId)}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <RefreshCw className={cn('h-4 w-4', digestingRunId === run.id && 'animate-spin')} />
-              {digestingRunId === run.id ? '复核中...' : '差异消化'}
-            </button>
+            {renderRunPrimaryActionButton(run)}
           </div>
         </div>
         <div className="space-y-5 px-6 py-5">
