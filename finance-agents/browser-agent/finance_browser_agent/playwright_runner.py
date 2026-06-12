@@ -29,11 +29,12 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from finance_browser_agent.chrome_launcher import launch_chrome
 from finance_browser_agent.playbook_interpreter import validate_step_actions
@@ -60,6 +61,150 @@ def _notify_risk_waiting() -> None:
             cb("RISK_VERIFICATION")
         except Exception:
             logger.exception("on_risk_waiting callback failed")
+
+
+# ---------------------------------------------------------------------------
+# Device-level login gate
+# ---------------------------------------------------------------------------
+# Prevents concurrent logins from different shops on the same device. Taobao
+# detects simultaneous multi-account logins on one device and immediately
+# invalidates whichever session logged in first ("安全认证已失效").
+#
+# Design:
+#   - One process-wide threading.Lock ensures only one login runs at a time.
+#   - A minimum inter-login interval (± 20 % jitter) keeps successive logins
+#     spaced far enough apart that Taobao's device-level risk engine sees them
+#     as distinct independent sessions.
+#   - Jobs that are already authenticated never touch the gate — normal-day
+#     concurrency is completely unaffected.
+#   - The gate is held for the full duration of the owning job (acquired before
+#     the login step, released in a finally block after the job finishes). This
+#     prevents a second job from inserting its own login while job A is still
+#     downloading data inside the same Chrome session.
+#   - Because release is always in a finally block the lock cannot leak. A
+#     crash inside the thread terminates the thread and Python's threading.Lock
+#     is automatically released when the thread that holds it is destroyed.
+#   - Handoff / manual login: if an AUTH_EXPIRED job is handed off to a human
+#     who logs in while the gate is still held by another running job, the gate
+#     will be free by the time the next scheduled job for that shop attempts to
+#     login — no deadlock risk.
+
+_LOGIN_GATE_LOCK = threading.Lock()
+_LOGIN_GATE_LAST_FINISHED: float = 0.0  # time.monotonic() of last login completion
+_LOGIN_GATE_HOLDER_JOB_ID: str = ""     # for diagnostic logging only
+
+
+class LoginGate:
+    """Serialise Taobao logins across all concurrent browser-agent jobs.
+
+    ``acquire_for_login()`` blocks until the gate is free AND the minimum
+    interval since the previous login has elapsed (with ±20 % random jitter).
+
+    ``release(now)`` records the completion time and frees the gate so the next
+    waiting job can proceed.
+
+    The gate is designed to be injected into tests via the ``clock`` parameter
+    so timing behaviour can be verified without real sleeps.
+    """
+
+    def __init__(
+        self,
+        *,
+        lock: threading.Lock | None = None,
+        clock: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
+    ) -> None:
+        self._lock = lock if lock is not None else _LOGIN_GATE_LOCK
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or time.sleep
+        # Shared mutable state lives at module level so all instances see the
+        # same values (tests may pass their own lock to isolate).
+        self._last_finished_ref: list[float] = []  # set by _attach; or use module globals
+        self._holder_ref: list[str] = []
+        self._use_globals = lock is None
+
+    def _get_last_finished(self) -> float:
+        if self._use_globals:
+            return _LOGIN_GATE_LAST_FINISHED
+        return self._last_finished_ref[0] if self._last_finished_ref else 0.0
+
+    def _set_last_finished(self, value: float) -> None:
+        global _LOGIN_GATE_LAST_FINISHED
+        if self._use_globals:
+            _LOGIN_GATE_LAST_FINISHED = value
+        elif self._last_finished_ref:
+            self._last_finished_ref[0] = value
+
+    def _get_holder(self) -> str:
+        if self._use_globals:
+            return _LOGIN_GATE_HOLDER_JOB_ID
+        return self._holder_ref[0] if self._holder_ref else ""
+
+    def _set_holder(self, value: str) -> None:
+        global _LOGIN_GATE_HOLDER_JOB_ID
+        if self._use_globals:
+            _LOGIN_GATE_HOLDER_JOB_ID = value
+        elif self._holder_ref:
+            self._holder_ref[0] = value
+
+    def acquire_for_login(self, *, job_id: str = "", min_interval_seconds: float = 180.0) -> None:
+        """Block until the gate is free and the inter-login interval has elapsed."""
+        holder = self._get_holder()
+        if holder:
+            logger.info(
+                "login gate waiting: job_id=%s held_by=%s",
+                job_id,
+                holder,
+            )
+        self._lock.acquire()
+        self._set_holder(job_id)
+        # Apply ± 20 % jitter to the minimum interval.
+        jitter_factor = 1.0 + random.uniform(-0.2, 0.2)
+        effective_interval = max(0.0, min_interval_seconds * jitter_factor)
+        last = self._get_last_finished()
+        if last > 0:
+            elapsed = self._clock() - last
+            wait = effective_interval - elapsed
+            if wait > 0:
+                logger.info(
+                    "login gate interval wait: job_id=%s wait_seconds=%.1f min_interval=%.1f",
+                    job_id,
+                    wait,
+                    min_interval_seconds,
+                )
+                self._sleep(wait)
+
+    def release(self, now: float | None = None) -> None:
+        """Record login completion time and release the gate."""
+        self._set_last_finished(now if now is not None else self._clock())
+        self._set_holder("")
+        try:
+            self._lock.release()
+        except RuntimeError:
+            # Already released — should not happen, but guard against it.
+            logger.warning("login gate release called when lock was not held")
+
+    @classmethod
+    def make_test_instance(
+        cls,
+        *,
+        clock: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
+    ) -> "LoginGate":
+        """Return an isolated instance for unit tests (separate lock + state)."""
+        gate = cls(lock=threading.Lock(), clock=clock, sleep=sleep)
+        gate._use_globals = False
+        gate._last_finished_ref = [0.0]
+        gate._holder_ref = [""]
+        return gate
+
+
+# Module-level singleton used by production code.
+_device_login_gate = LoginGate()
+
+
+def _login_min_interval_seconds() -> float:
+    return float(_env_int("BROWSER_AGENT_LOGIN_MIN_INTERVAL_SECONDS", 180))
 
 
 _AUTH_REDIRECT_MARKERS = (
@@ -2289,6 +2434,9 @@ def _run_playbook_with_playwright_inner(
         config.window_y,
     )
 
+    # Track whether this job acquired the device-level login gate so we can
+    # release it in the outermost finally block regardless of how we exit.
+    _login_gate_acquired = False
     try:
         profile_lock = _profile_file_lock(user_data_dir)
         with profile_lock:
@@ -2322,6 +2470,19 @@ def _run_playbook_with_playwright_inner(
                                         step_dict.get("id") or "",
                                     )
                                     continue
+                                # Login is required — acquire the device-level gate BEFORE
+                                # executing the login step.  This serialises all logins on this
+                                # device and enforces the minimum inter-login interval so that
+                                # simultaneous multi-account logins do not trigger Taobao's
+                                # device-level risk engine.  The gate is held until the job
+                                # finishes (released in the outermost finally below) so that no
+                                # second job can begin its own login while this job's Chrome
+                                # session is still active.
+                                _device_login_gate.acquire_for_login(
+                                    job_id=job_id,
+                                    min_interval_seconds=_login_min_interval_seconds(),
+                                )
+                                _login_gate_acquired = True
                                 logger.info(
                                     "browser login required for profile: job_id=%s step_id=%s diagnostics=%s",
                                     job_id,
@@ -2403,6 +2564,11 @@ def _run_playbook_with_playwright_inner(
             "fail_reason": "OTHER",
             "error_info": {"message": str(exc)},
         }
+    finally:
+        # Always release the login gate if this job acquired it.  Records
+        # the completion timestamp so the next login respects the interval.
+        if _login_gate_acquired:
+            _device_login_gate.release()
 
     output = dict(playbook.get("output") or {})
     quality_gate = dict(playbook.get("quality_gate") or {})
