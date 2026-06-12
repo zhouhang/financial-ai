@@ -350,6 +350,7 @@ _EXECUTION_TOOL_NAMES = {
     "recon_digest_finalize_daily",
     "recon_digest_delivery_record",
     "execution_run_exception_get",
+    "execution_run_exception_clear_by_run",
     "execution_run_exception_create",
     "execution_run_exception_bulk_create",
     "execution_run_exception_update",

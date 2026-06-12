@@ -10443,6 +10443,8 @@ def update_execution_run(
     anomaly_count: int | None = None,
     started_at_now: bool = False,
     finished_at_now: bool = False,
+    restart_started_at_now: bool = False,
+    reset_finished_at: bool = False,
 ) -> dict | None:
     """更新执行记录。"""
     conn_manager = get_conn()
@@ -10480,8 +10482,16 @@ def update_execution_run(
                             ELSE %s::jsonb
                         END,
                         anomaly_count = COALESCE(%s, anomaly_count),
-                        started_at = CASE WHEN %s THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END,
-                        finished_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE finished_at END,
+                        started_at = CASE
+                            WHEN %s THEN CURRENT_TIMESTAMP
+                            WHEN %s THEN COALESCE(started_at, CURRENT_TIMESTAMP)
+                            ELSE started_at
+                        END,
+                        finished_at = CASE
+                            WHEN %s THEN NULL
+                            WHEN %s THEN CURRENT_TIMESTAMP
+                            ELSE finished_at
+                        END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                       AND company_id = %s
@@ -10509,7 +10519,9 @@ def update_execution_run(
                         psycopg2.extras.Json(artifacts_json) if artifacts_json is not None else psycopg2.extras.Json(None),
                         psycopg2.extras.Json(artifacts_json) if artifacts_json is not None else psycopg2.extras.Json(None),
                         anomaly_count,
+                        restart_started_at_now,
                         started_at_now,
+                        reset_finished_at,
                         finished_at_now,
                         run_id,
                         company_id,
@@ -10623,6 +10635,30 @@ def list_open_execution_run_exceptions(*, run_id: str) -> list[dict]:
         # 不吞错返回 []:空列表会被消化工具当成"无未关闭差异"短路,掩盖查询失败
         logger.error(f"查询未关闭 execution_run_exceptions 失败 (run_id={run_id}): {e}")
         raise
+
+
+def delete_execution_run_exceptions_by_run_id(*, company_id: str, run_id: str) -> int:
+    """删除指定执行记录下的异常派生数据，返回删除行数。"""
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM execution_run_exceptions
+                    WHERE company_id = %s
+                      AND run_id = %s
+                    """,
+                    (company_id, run_id),
+                )
+                deleted_count = int(cur.rowcount or 0)
+                conn.commit()
+                return deleted_count
+    except Exception as e:
+        logger.error(
+            f"删除 execution_run_exceptions 失败 (company_id={company_id}, run_id={run_id}): {e}"
+        )
+        return 0
 
 
 def list_execution_runs(

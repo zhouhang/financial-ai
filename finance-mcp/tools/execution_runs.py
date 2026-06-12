@@ -424,6 +424,8 @@ def create_tools() -> list[Tool]:
                     "anomaly_count": {"type": "integer"},
                     "started_at_now": {"type": "boolean"},
                     "finished_at_now": {"type": "boolean"},
+                    "restart_started_at_now": {"type": "boolean"},
+                    "reset_finished_at": {"type": "boolean"},
                 },
                 "required": ["auth_token", "run_id"],
             },
@@ -596,6 +598,18 @@ def create_tools() -> list[Tool]:
                     "exception_id": {"type": "string"},
                 },
                 "required": ["auth_token", "exception_id"],
+            },
+        ),
+        Tool(
+            name="execution_run_exception_clear_by_run",
+            description="删除指定执行记录下的异常派生数据，用于原地重试成功后写入新异常前清理旧异常。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "auth_token": {"type": "string"},
+                    "run_id": {"type": "string"},
+                },
+                "required": ["auth_token", "run_id"],
             },
         ),
         Tool(
@@ -838,6 +852,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
             return _recon_digest_delivery_record(arguments)
         if name == "execution_run_exception_get":
             return _exception_get(arguments)
+        if name == "execution_run_exception_clear_by_run":
+            return _run_exception_clear_by_run(arguments)
         if name == "execution_run_exception_create":
             return _exception_create(arguments)
         if name == "execution_run_exception_bulk_create":
@@ -2878,6 +2894,8 @@ def _run_update(arguments: dict[str, Any]) -> dict[str, Any]:
         else None,
         started_at_now=_as_bool(arguments.get("started_at_now"), False),
         finished_at_now=_as_bool(arguments.get("finished_at_now"), False),
+        restart_started_at_now=_as_bool(arguments.get("restart_started_at_now"), False),
+        reset_finished_at=_as_bool(arguments.get("reset_finished_at"), False),
     )
     if not item:
         return {"success": False, "error": "执行记录不存在或更新失败"}
@@ -2926,6 +2944,19 @@ def _run_exceptions(arguments: dict[str, Any]) -> dict[str, Any]:
     scheme = _get_run_scheme_for_hydration(company_id, run)
     items = hydrate_execution_exception_details(run=run, scheme=scheme, exceptions=items)
     return {"success": True, "count": len(items), "run": run, "scheme": scheme, "exceptions": items}
+
+
+def _run_exception_clear_by_run(arguments: dict[str, Any]) -> dict[str, Any]:
+    user = _require_user(arguments.get("auth_token", ""))
+    company_id = str(user.get("company_id") or "")
+    run_id = _as_text(arguments.get("run_id"))
+    if not run_id:
+        return {"success": False, "error": "run_id 不能为空"}
+    deleted_count = auth_db.delete_execution_run_exceptions_by_run_id(
+        company_id=company_id,
+        run_id=run_id,
+    )
+    return {"success": True, "deleted_count": deleted_count}
 
 
 def _run_public_exception_bundle(arguments: dict[str, Any]) -> dict[str, Any]:
