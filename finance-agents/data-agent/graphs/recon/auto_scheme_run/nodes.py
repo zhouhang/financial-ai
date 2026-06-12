@@ -503,6 +503,8 @@ def _safe_list(value: Any) -> list[Any]:
 
 
 def _is_in_place_retry_context(ctx: dict[str, Any], run_id: str) -> bool:
+    if not str(run_id or "").strip():
+        return False
     run_context = _safe_dict(ctx.get("run_context"))
     if str(run_context.get("trigger_type") or "").strip() != "rerun":
         return False
@@ -511,6 +513,11 @@ def _is_in_place_retry_context(ctx: dict[str, Any], run_id: str) -> bool:
     target_run_id = str(run_context.get("target_run_id") or "").strip()
     retry_from_run_id = str(run_context.get("retry_from_failed_run_id") or "").strip()
     return target_run_id == run_id and retry_from_run_id == run_id
+
+
+def _is_execution_run_success(ctx: dict[str, Any]) -> bool:
+    run = _safe_dict(ctx.get("execution_run_record"))
+    return str(run.get("execution_status") or "").strip().lower() == "success"
 
 
 async def _clear_previous_retry_exceptions_if_needed(
@@ -3522,12 +3529,29 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
     run_id = str(run.get("id") or "").strip()
     scheme_code = str(ctx.get("scheme_code") or "").strip()
     anomalies = [v for v in _safe_list(ctx.get("anomaly_items")) if isinstance(v, dict)]
-    if run_id and scheme_code:
+    if (
+        run_id
+        and scheme_code
+        and _is_in_place_retry_context(ctx, run_id)
+        and _is_execution_run_success(ctx)
+    ):
         await _clear_previous_retry_exceptions_if_needed(auth_token=auth_token, ctx=ctx, run_id=run_id)
     if (
         _is_in_place_retry_context(ctx, run_id)
         and ctx.get("retry_previous_exceptions_cleared") is False
     ):
+        error = str(ctx.get("retry_previous_exceptions_clear_error") or "清理旧异常失败")
+        failed_run = await _persist_execution_run(
+            auth_token=auth_token,
+            ctx=ctx,
+            execution_status="failed",
+            failed_stage="exception_cleanup",
+            failed_reason=error,
+        )
+        if failed_run:
+            ctx["execution_run_record"] = failed_run
+        ctx["failed_stage"] = "exception_cleanup"
+        ctx["failed_reason"] = error
         ctx["exception_creation_skipped_reason"] = "retry_previous_exceptions_clear_failed"
         return {"recon_ctx": ctx}
     if not run_id or not scheme_code or not anomalies:

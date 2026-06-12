@@ -160,7 +160,7 @@ async def test_retry_success_clears_old_exceptions_even_when_no_new_anomalies(
         "auth_token": "token",
         "recon_ctx": {
             "scheme_code": "scheme-1",
-            "execution_run_record": {"id": "run-1"},
+            "execution_run_record": {"id": "run-1", "execution_status": "success"},
             "run_context": {
                 "trigger_type": "rerun",
                 "target_run_id": "run-1",
@@ -181,6 +181,35 @@ async def test_retry_success_clears_old_exceptions_even_when_no_new_anomalies(
     ]
     assert result["recon_ctx"]["retry_previous_exceptions_cleared"] is True
     assert result["recon_ctx"]["retry_previous_exceptions_deleted_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_failed_retry_run_does_not_clear_old_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_call_mcp_tool(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError(f"unexpected MCP call: {name}")
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "scheme_code": "scheme-1",
+            "execution_run_record": {"id": "run-1", "execution_status": "failed"},
+            "run_context": {
+                "trigger_type": "rerun",
+                "target_run_id": "run-1",
+                "execution_run_id": "run-1",
+                "retry_from_failed_run_id": "run-1",
+            },
+            "anomaly_items": [],
+        },
+    }
+
+    result = await nodes.create_exception_tasks_node(state)
+
+    assert "retry_previous_exceptions_cleared" not in result["recon_ctx"]
 
 
 @pytest.mark.asyncio
@@ -210,7 +239,7 @@ async def test_retry_success_clears_old_exceptions_before_bulk_create(
             "scheme_code": "scheme-1",
             "run_plan": {},
             "scheme": {},
-            "execution_run_record": {"id": "run-1"},
+            "execution_run_record": {"id": "run-1", "execution_status": "success"},
             "run_context": {
                 "trigger_type": "rerun",
                 "target_run_id": "run-1",
@@ -265,6 +294,8 @@ async def test_retry_success_stops_bulk_create_when_clear_fails(
         calls.append(name)
         if name == "execution_run_exception_clear_by_run":
             return {"success": False, "error": "delete failed"}
+        if name == "execution_run_update":
+            return {"success": True}
         if name == "execution_run_exception_bulk_create":
             raise AssertionError("bulk create must not run when retry cleanup fails")
         return {"success": True}
@@ -278,7 +309,7 @@ async def test_retry_success_stops_bulk_create_when_clear_fails(
                 "scheme_code": "scheme-1",
                 "run_plan": {},
                 "scheme": {},
-                "execution_run_record": {"id": "run-1"},
+                "execution_run_record": {"id": "run-1", "execution_status": "success"},
                 "run_context": {
                     "trigger_type": "rerun",
                     "target_run_id": "run-1",
@@ -290,10 +321,67 @@ async def test_retry_success_stops_bulk_create_when_clear_fails(
         }
     )
 
-    assert calls == ["execution_run_exception_clear_by_run"]
+    assert calls == ["execution_run_exception_clear_by_run", "execution_run_update"]
     assert result["recon_ctx"]["retry_previous_exceptions_cleared"] is False
     assert result["recon_ctx"]["retry_previous_exceptions_clear_error"] == "delete failed"
+    assert result["recon_ctx"]["failed_stage"] == "exception_cleanup"
+    assert result["recon_ctx"]["failed_reason"] == "delete failed"
     assert (
         result["recon_ctx"]["exception_creation_skipped_reason"]
         == "retry_previous_exceptions_clear_failed"
     )
+
+
+@pytest.mark.asyncio
+async def test_retry_cleanup_failure_marks_run_failed_and_skips_bulk_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fake_call_mcp_tool(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append(name)
+        if name == "execution_run_exception_clear_by_run":
+            return {"success": False, "error": "delete failed"}
+        if name == "execution_run_update":
+            return {
+                "success": True,
+                "run": {
+                    "id": payload["run_id"],
+                    "execution_status": payload["execution_status"],
+                    "failed_stage": payload["failed_stage"],
+                    "failed_reason": payload["failed_reason"],
+                },
+            }
+        if name == "execution_run_exception_bulk_create":
+            raise AssertionError("bulk create must not run after cleanup failure")
+        return {"success": True}
+
+    monkeypatch.setattr(nodes, "call_mcp_tool", fake_call_mcp_tool)
+
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "scheme_code": "scheme-1",
+            "execution_run_record": {"id": "run-1", "execution_status": "success"},
+            "run_context": {
+                "trigger_type": "rerun",
+                "target_run_id": "run-1",
+                "execution_run_id": "run-1",
+                "retry_from_failed_run_id": "run-1",
+            },
+            "anomaly_items": [{"item_id": "a1", "anomaly_type": "source_only"}],
+            "recon_observation": {
+                "anomaly_items": [{"item_id": "a1", "anomaly_type": "source_only"}]
+            },
+        },
+    }
+
+    result = await nodes.create_exception_tasks_node(state)
+
+    assert calls == ["execution_run_exception_clear_by_run", "execution_run_update"]
+    ctx = result["recon_ctx"]
+    assert ctx["retry_previous_exceptions_cleared"] is False
+    assert ctx["failed_stage"] == "exception_cleanup"
+    assert ctx["failed_reason"] == "delete failed"
+    assert ctx["execution_run_record"]["execution_status"] == "failed"
+    assert ctx["exception_creation_skipped_reason"] == "retry_previous_exceptions_clear_failed"
