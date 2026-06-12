@@ -209,6 +209,10 @@ def test_exception_hydration_replaces_empty_side_record(monkeypatch) -> None:
 
     def fake_browser_records(**kwargs: object) -> list[dict[str, object]]:
         browser_calls.append(kwargs)
+        if kwargs.get("biz_date"):
+            return []
+        if kwargs.get("dataset_code"):
+            return []
         return [
             {
                 "payload": {
@@ -233,4 +237,8 @@ def test_exception_hydration_replaces_empty_side_record(monkeypatch) -> None:
 
     detail_json = result[0]["detail_json"]
     assert detail_json["source_record"]["订单付款时间"] == "2026-06-08 15:13:48"
-    assert browser_calls[0]["filters"] == {"订单编号": "3306514334587002794"}
+    assert browser_calls[0]["biz_date"] == "2026-06-09"
+    assert browser_calls[1]["biz_date"] is None
+    assert browser_calls[1]["dataset_code"] == "sold-orders"
+    assert browser_calls[2]["dataset_code"] is None
+    assert browser_calls[2]["filters"] == {"订单编号": "3306514334587002794"}
