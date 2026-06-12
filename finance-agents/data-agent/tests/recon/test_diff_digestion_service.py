@@ -13,6 +13,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]  # finance-agents/data-agent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+TESTS_DIR = ROOT / "tests"
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+from _import_isolation import prefer_data_agent_imports
+
+prefer_data_agent_imports(__file__)
 
 diff_digestion_service = importlib.import_module("graphs.recon.diff_digestion_service")
 recon_worker = importlib.import_module("recon_worker")

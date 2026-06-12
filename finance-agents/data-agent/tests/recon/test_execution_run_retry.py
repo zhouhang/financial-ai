@@ -10,9 +10,16 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 RECON_DIR = ROOT / "graphs" / "recon"
+TESTS_DIR = ROOT / "tests"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
+from _import_isolation import prefer_data_agent_imports
+
+prefer_data_agent_imports(__file__)
 
 
 def _ensure_package(name: str, path: Path) -> types.ModuleType:
