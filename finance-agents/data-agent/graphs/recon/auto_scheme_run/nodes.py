@@ -502,6 +502,39 @@ def _safe_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, list) else []
 
 
+def _is_in_place_retry_context(ctx: dict[str, Any], run_id: str) -> bool:
+    run_context = _safe_dict(ctx.get("run_context"))
+    if str(run_context.get("trigger_type") or "").strip() != "rerun":
+        return False
+    if str(run_context.get("execution_run_id") or "").strip() != run_id:
+        return False
+    target_run_id = str(run_context.get("target_run_id") or "").strip()
+    retry_from_run_id = str(run_context.get("retry_from_failed_run_id") or "").strip()
+    return target_run_id == run_id and retry_from_run_id == run_id
+
+
+async def _clear_previous_retry_exceptions_if_needed(
+    *,
+    auth_token: str,
+    ctx: dict[str, Any],
+    run_id: str,
+) -> None:
+    if not auth_token or not run_id:
+        return
+    if ctx.get("retry_previous_exceptions_cleared"):
+        return
+    if not _is_in_place_retry_context(ctx, run_id):
+        return
+    result = await call_mcp_tool(
+        "execution_run_exception_clear_by_run",
+        {"auth_token": auth_token, "run_id": run_id},
+    )
+    ctx["retry_previous_exceptions_cleared"] = bool(result.get("success"))
+    ctx["retry_previous_exceptions_deleted_count"] = int(result.get("deleted_count") or 0)
+    if not result.get("success"):
+        ctx["retry_previous_exceptions_clear_error"] = str(result.get("error") or "清理旧异常失败")
+
+
 def _first_text_from_dicts(dicts: list[dict[str, Any]], *keys: str) -> str:
     for item in dicts:
         for key in keys:
@@ -3489,6 +3522,14 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
     run_id = str(run.get("id") or "").strip()
     scheme_code = str(ctx.get("scheme_code") or "").strip()
     anomalies = [v for v in _safe_list(ctx.get("anomaly_items")) if isinstance(v, dict)]
+    if run_id and scheme_code:
+        await _clear_previous_retry_exceptions_if_needed(auth_token=auth_token, ctx=ctx, run_id=run_id)
+    if (
+        _is_in_place_retry_context(ctx, run_id)
+        and ctx.get("retry_previous_exceptions_cleared") is False
+    ):
+        ctx["exception_creation_skipped_reason"] = "retry_previous_exceptions_clear_failed"
+        return {"recon_ctx": ctx}
     if not run_id or not scheme_code or not anomalies:
         return {"recon_ctx": ctx}
 

@@ -291,3 +291,57 @@ async def test_worker_non_resolve_still_uses_execute_run_plan_run(
 
     assert "execute_run_plan_run" in calls, "schedule job 应走原路径"
     assert "digestion" not in calls, "schedule job 不应调差异消化"
+
+
+@pytest.mark.anyio
+async def test_worker_rerun_passes_execution_run_id_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rerun job 应保留原 run_context 中的 in-place retry 标识，并补充 queue_job_id。"""
+    captured: dict[str, Any] = {}
+
+    async def fake_execute_run_plan_run(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "biz_date": "2026-06-10",
+            "run": {"id": "run-1", "execution_status": "success", "artifacts_json": {}},
+        }
+
+    async def fake_complete(token: str, job_id: str) -> dict[str, Any]:
+        return {"success": True, "job": {"finished_at": "2026-06-10T09:00:00+00:00"}}
+
+    async def fake_update(token: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return {"success": True}
+
+    async def fake_finalize(**kwargs: Any) -> dict[str, Any]:
+        return {"success": True, "ready_count": 0, "delivered_count": 0, "blocked_count": 0}
+
+    monkeypatch.setattr(recon_worker, "execute_run_plan_run", fake_execute_run_plan_run)
+    monkeypatch.setattr(recon_worker, "recon_queue_complete", fake_complete)
+    monkeypatch.setattr(recon_worker, "execution_run_update", fake_update)
+    monkeypatch.setattr(recon_worker, "finalize_and_deliver_daily_digest", fake_finalize)
+
+    await recon_worker._process_job(
+        {
+            "id": "job-1",
+            "company_id": "company-1",
+            "run_plan_code": "plan-1",
+            "biz_date": "2026-06-10",
+            "trigger_mode": "rerun",
+            "status": "queued",
+            "run_context": {
+                "target_run_id": "run-1",
+                "execution_run_id": "run-1",
+                "retry_from_failed_run_id": "run-1",
+            },
+        },
+        "system-token",
+    )
+
+    assert captured["run_plan_code"] == "plan-1"
+    assert captured["trigger_mode"] == "rerun"
+    assert captured["run_context"]["target_run_id"] == "run-1"
+    assert captured["run_context"]["execution_run_id"] == "run-1"
+    assert captured["run_context"]["retry_from_failed_run_id"] == "run-1"
+    assert captured["run_context"]["queue_job_id"] == "job-1"
