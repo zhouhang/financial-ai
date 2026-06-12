@@ -3541,6 +3541,12 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
         and ctx.get("retry_previous_exceptions_cleared") is False
     ):
         error = str(ctx.get("retry_previous_exceptions_clear_error") or "清理旧异常失败")
+        failed_record = {
+            **_safe_dict(ctx.get("execution_run_record")),
+            "execution_status": "failed",
+            "failed_stage": "exception_cleanup",
+            "failed_reason": error,
+        }
         failed_run = await _persist_execution_run(
             auth_token=auth_token,
             ctx=ctx,
@@ -3548,8 +3554,10 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
             failed_stage="exception_cleanup",
             failed_reason=error,
         )
-        if failed_run:
-            ctx["execution_run_record"] = failed_run
+        ctx["execution_run_record"] = {**failed_record, **_safe_dict(failed_run)}
+        ctx["execution_run_record"]["execution_status"] = "failed"
+        ctx["execution_run_record"]["failed_stage"] = "exception_cleanup"
+        ctx["execution_run_record"]["failed_reason"] = error
         ctx["failed_stage"] = "exception_cleanup"
         ctx["failed_reason"] = error
         ctx["exception_creation_skipped_reason"] = "retry_previous_exceptions_clear_failed"
@@ -3719,6 +3727,14 @@ async def create_exception_tasks_node(state: AgentState) -> dict[str, Any]:
 
 async def maybe_auto_notify_node(state: AgentState) -> dict[str, Any]:
     ctx = _get_recon_ctx(state)
+    if (
+        str(ctx.get("failed_stage") or "") == "exception_cleanup"
+        or str(ctx.get("exception_creation_skipped_reason") or "")
+        == "retry_previous_exceptions_clear_failed"
+    ):
+        ctx["auto_notify_skipped_reason"] = "exception_cleanup_failed"
+        return {"recon_ctx": ctx}
+
     auth_token = str(state.get("auth_token") or "")
     run_plan = _safe_dict(ctx.get("run_plan"))
     policy = _safe_dict(ctx.get("auto_notify_policy")) or _resolve_notify_policy(run_plan)
