@@ -130,9 +130,10 @@ def test_public_exception_bundle_hydrates_legacy_target_only_source_record(monke
     assert detail_json["target_record"]["订单付款时间"] == "2026-05-27 12:00:00"
     assert browser_calls[0]["filters"] == {"订单编号": "5118001236570006333"}
     assert browser_calls[0]["dataset_id"] == "dataset-right"
+    assert browser_calls[0]["biz_date"] == "2026-05-27"
 
 
-def test_exception_hydration_replaces_empty_side_record(monkeypatch) -> None:
+def test_exception_hydration_does_not_cross_biz_date_for_missing_side(monkeypatch) -> None:
     run = {
         "id": "run-1",
         "company_id": "company-1",
@@ -211,8 +212,6 @@ def test_exception_hydration_replaces_empty_side_record(monkeypatch) -> None:
         browser_calls.append(kwargs)
         if kwargs.get("biz_date"):
             return []
-        if kwargs.get("dataset_code"):
-            return []
         return [
             {
                 "payload": {
@@ -236,9 +235,7 @@ def test_exception_hydration_replaces_empty_side_record(monkeypatch) -> None:
     )
 
     detail_json = result[0]["detail_json"]
-    assert detail_json["source_record"]["订单付款时间"] == "2026-06-08 15:13:48"
+    assert detail_json["source_record"] == {"订单编号": None}
+    assert len(browser_calls) == 1
     assert browser_calls[0]["biz_date"] == "2026-06-09"
-    assert browser_calls[1]["biz_date"] is None
-    assert browser_calls[1]["dataset_code"] == "sold-orders"
-    assert browser_calls[2]["dataset_code"] is None
-    assert browser_calls[2]["filters"] == {"订单编号": "3306514334587002794"}
+    assert browser_calls[0]["filters"] == {"订单编号": "3306514334587002794"}

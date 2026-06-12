@@ -95,6 +95,30 @@ describe('BrowserPlaybookPanel', () => {
     expect(deleteButton).toHaveClass('whitespace-nowrap');
   });
 
+  it('最近更新展示浏览器任务的真实更新时间而不是数据源配置更新时间', () => {
+    render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[
+          {
+            ...sources[0],
+            updated_at: '2026-05-21T09:00:00+08:00',
+            browser_verification: {
+              sync_job_id: 'sync-success-1',
+              job_status: 'success',
+              updated_at: '2026-05-25T15:30:00+08:00',
+              completed_at: '2026-05-25T15:31:51+08:00',
+              is_verification: true,
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('2026/5/25 15:31:51')).toBeInTheDocument();
+    expect(screen.queryByText('2026/5/21 09:00:00')).not.toBeInTheDocument();
+  });
+
   it('浏览器任务列表超过一页时分页显示', () => {
     const manySources = Array.from({ length: 25 }, (_, index) => {
       const itemNumber = String(index + 1).padStart(2, '0');
