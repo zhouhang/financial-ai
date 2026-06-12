@@ -47,6 +47,7 @@ const runsPayload = [
 ];
 
 function setupFetch() {
+  let failedRunFetches = 0;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url === '/api/recon/schemes?include_disabled=false&limit=20&offset=0') {
@@ -84,7 +85,29 @@ function setupFetch() {
       return jsonResponse({ runs: runsPayload, total: runsPayload.length });
     }
     if (url === '/api/recon/runs/run-failed') {
-      return jsonResponse({ run: runPayload('run-failed', 'failed', '失败运行') });
+      failedRunFetches += 1;
+      return jsonResponse({
+        run: runPayload(
+          'run-failed',
+          failedRunFetches === 1 ? 'running' : 'failed',
+          '失败运行',
+        ),
+      });
+    }
+    if (url === '/api/recon/runs/run-success') {
+      return jsonResponse({ run: runPayload('run-success', 'success', '成功运行') });
+    }
+    if (url === '/api/recon/runs/run-running') {
+      return jsonResponse({ run: runPayload('run-running', 'running', '运行中记录') });
+    }
+    if (url === '/api/recon/runs/run-failed/exceptions') {
+      return jsonResponse({ exceptions: [], total: 0 });
+    }
+    if (url === '/api/recon/runs/run-success/exceptions') {
+      return jsonResponse({ exceptions: [], total: 0 });
+    }
+    if (url === '/api/recon/runs/run-running/exceptions') {
+      return jsonResponse({ exceptions: [], total: 0 });
     }
     if (url === '/api/recon/runs/rerun' && init?.method === 'POST') {
       return jsonResponse({ success: true, run_id: 'run-retry-001' });
@@ -112,29 +135,40 @@ afterEach(() => {
 });
 
 describe('ReconWorkspace run retry actions', () => {
-  it('shows one primary action for failed and successful runs only', async () => {
+  it('keeps primary actions out of the run list and shows them in details only', async () => {
     setupFetch();
 
     await renderRunsTab();
 
     const failedRow = screen.getByTestId('execution-run-row-run-failed');
-    expect(within(failedRow).getByRole('button', { name: '重试' })).toBeTruthy();
+    expect(within(failedRow).queryByRole('button', { name: '重试' })).toBeNull();
     expect(within(failedRow).queryByRole('button', { name: '差异消化' })).toBeNull();
 
     const successRow = screen.getByTestId('execution-run-row-run-success');
-    expect(within(successRow).getByRole('button', { name: '差异消化' })).toBeTruthy();
+    expect(within(successRow).queryByRole('button', { name: '差异消化' })).toBeNull();
     expect(within(successRow).queryByRole('button', { name: '重试' })).toBeNull();
 
     const runningRow = screen.getByTestId('execution-run-row-run-running');
     expect(within(runningRow).queryByRole('button', { name: '重试' })).toBeNull();
     expect(within(runningRow).queryByRole('button', { name: '差异消化' })).toBeNull();
+
+    fireEvent.click(within(failedRow).getByRole('button', { name: '异常看板' }));
+    expect(await screen.findByRole('button', { name: '重试' })).toBeTruthy();
+
+    cleanup();
+    setupFetch();
+    await renderRunsTab();
+    fireEvent.click(within(screen.getByTestId('execution-run-row-run-success')).getByRole('button', { name: '异常看板' }));
+    expect(await screen.findByRole('button', { name: '差异消化' })).toBeTruthy();
   });
 
-  it('posts retry request and shows notice after refreshing runs', async () => {
+  it('posts retry request and keeps polling until the original run leaves running state', async () => {
     const fetchMock = setupFetch();
 
     await renderRunsTab();
-    fireEvent.click(within(screen.getByTestId('execution-run-row-run-failed')).getByRole('button', { name: '重试' }));
+    fireEvent.click(within(screen.getByTestId('execution-run-row-run-failed')).getByRole('button', { name: '异常看板' }));
+    const retryButton = await screen.findByRole('button', { name: '重试' });
+    fireEvent.click(retryButton);
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -146,5 +180,9 @@ describe('ReconWorkspace run retry actions', () => {
       );
     });
     expect(await screen.findByText('已发起重试,当前运行记录将更新为最新执行结果。')).toBeTruthy();
+    await waitFor(() => {
+      const runFetchCalls = fetchMock.mock.calls.filter(([input]) => String(input) === '/api/recon/runs/run-failed');
+      expect(runFetchCalls).toHaveLength(2);
+    });
   });
 });

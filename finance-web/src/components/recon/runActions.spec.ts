@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canDigestRun, canRetryRun, runActionForStatus } from './runActions';
+import { canDigestRun, canRetryRun, isRunInProgress, runActionForStatus } from './runActions';
 
 describe('runActions', () => {
   it('shows retry only for failed runs', () => {
@@ -20,6 +20,20 @@ describe('runActions', () => {
       expect(canRetryRun({ executionStatus })).toBe(false);
       expect(canDigestRun({ executionStatus })).toBe(false);
       expect(runActionForStatus({ executionStatus })).toBeNull();
+    },
+  );
+
+  it.each(['running', 'waiting_data', 'queued', 'scheduled'])(
+    'treats %s as still in progress',
+    (executionStatus) => {
+      expect(isRunInProgress({ executionStatus })).toBe(true);
+    },
+  );
+
+  it.each(['success', 'failed', 'error', 'unknown', ''])(
+    'treats %s as terminal or non-progress',
+    (executionStatus) => {
+      expect(isRunInProgress({ executionStatus })).toBe(false);
     },
   );
 });

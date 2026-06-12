@@ -17,6 +17,12 @@ export function canDigestRun(input: RunStatusInput | string | null | undefined):
   return normalizedExecutionStatus(input) === 'success';
 }
 
+export function isRunInProgress(input: RunStatusInput | string | null | undefined): boolean {
+  return ['running', 'queued', 'waiting_data', 'scheduled'].includes(
+    normalizedExecutionStatus(input),
+  );
+}
+
 export function runActionForStatus(
   input: RunStatusInput | string | null | undefined,
 ): ReconRunPrimaryAction | null {

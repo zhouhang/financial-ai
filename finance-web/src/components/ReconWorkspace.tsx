@@ -25,7 +25,7 @@ import type {
 } from '../types';
 import { fetchReconAutoApi } from './recon/autoApi';
 import { extractPreviewSampleRows } from './recon/datasetPreview';
-import { canDigestRun, canRetryRun } from './recon/runActions';
+import { canDigestRun, canRetryRun, isRunInProgress } from './recon/runActions';
 import {
   filterBrowserCollectionFieldItems,
   isBrowserCollectionTechnicalSchemaSummary,
@@ -321,9 +321,10 @@ const SCHEME_LIST_TEMPLATE =
 const TASK_LIST_TEMPLATE =
   'minmax(260px,1.7fr) minmax(360px,2.2fr) minmax(140px,0.75fr) minmax(96px,0.45fr) minmax(240px,auto)';
 const RUN_LIST_TEMPLATE =
-  'minmax(0,2.4fr) minmax(150px,0.8fr) minmax(100px,0.55fr) minmax(120px,0.65fr) minmax(120px,0.65fr) minmax(270px,auto)';
+  'minmax(0,2.4fr) minmax(150px,0.8fr) minmax(100px,0.55fr) minmax(120px,0.65fr) minmax(120px,0.65fr) minmax(210px,auto)';
 const DIFF_DIGESTION_POLL_ATTEMPTS = 12;
 const DIFF_DIGESTION_POLL_INTERVAL_MS = 2000;
+const RUN_RETRY_POLL_ATTEMPTS = 6;
 
 const PREPARED_OUTPUT_FIELD_LABEL_MAP: Record<string, string> = {
   biz_key: '业务主键',
@@ -5559,14 +5560,19 @@ export default function ReconWorkspace({
           throw new Error(message);
         }
         setCenterNotice('已发起重试,当前运行记录将更新为最新执行结果。');
-        const [refreshedRun] = await Promise.all([refreshRunQuietly(runId), loadRunsPage(runsPage)]);
-        if (refreshedRun) {
-          setModalState((current) => (
-            current?.kind === 'run-exceptions' && current.run.id === runId
-              ? { ...current, run: refreshedRun }
-              : current
-          ));
+        let refreshedRun = await refreshRunQuietly(runId);
+        for (let attempt = 1; refreshedRun && isRunInProgress(refreshedRun) && attempt < RUN_RETRY_POLL_ATTEMPTS; attempt += 1) {
+          if (attempt > 1) {
+            await new Promise((resolve) => window.setTimeout(resolve, DIFF_DIGESTION_POLL_INTERVAL_MS));
+          }
+          refreshedRun = await refreshRunQuietly(runId);
         }
+        await loadRunsPage(runsPage);
+        setModalState((current) => (
+          current?.kind === 'run-exceptions' && current.run.id === runId && refreshedRun
+            ? { ...current, run: refreshedRun }
+            : current
+        ));
       } catch (error) {
         const message = error instanceof Error ? error.message : '发起重试失败';
         setCenterError(message);
@@ -6173,7 +6179,6 @@ export default function ReconWorkspace({
                     <AlertCircle className="h-4 w-4" />
                     异常看板
                   </button>
-                  {renderRunPrimaryActionButton(item)}
                   <button
                     type="button"
                     onClick={() => void handleDeleteRun(item)}
