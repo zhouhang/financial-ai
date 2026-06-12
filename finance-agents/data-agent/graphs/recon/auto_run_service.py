@@ -737,6 +737,65 @@ def _shift_biz_date(biz_date: str, offset_days: int) -> str:
     return (base_date + timedelta(days=offset_days)).isoformat()
 
 
+def _normalize_biz_date_offset(offset: str) -> int:
+    normalized = str(offset or "").strip().lower()
+    if not normalized:
+        return -1
+    if normalized in {"t", "t+0", "today", "current_day"}:
+        return 0
+    if normalized in {"t-1", "previous_day", "yesterday"}:
+        return -1
+    if normalized.startswith("t+") or normalized.startswith("t-"):
+        sign = 1 if normalized.startswith("t+") else -1
+        try:
+            return sign * int(normalized[2:])
+        except ValueError:
+            return -1
+    return -1
+
+
+def _extract_run_trigger_date(source_run: dict[str, Any], run_context: dict[str, Any]) -> str:
+    candidates = [
+        run_context.get("schedule_slot"),
+        run_context.get("scheduler_triggered_at"),
+        run_context.get("queue_created_at"),
+        run_context.get("queue_started_at"),
+        source_run.get("started_at"),
+        source_run.get("created_at"),
+    ]
+    for value in candidates:
+        text = str(value or "").strip()
+        match = re.search(r"\d{4}-\d{2}-\d{2}", text)
+        if match:
+            return match.group(0)
+    return ""
+
+
+async def _recover_rerun_biz_date_from_plan(
+    auth_token: str,
+    *,
+    source_run: dict[str, Any],
+    run_context: dict[str, Any],
+    run_plan_code: str,
+) -> str:
+    if not auth_token or not run_plan_code:
+        return ""
+    plan_result = await execution_run_plan_get(auth_token, plan_code=run_plan_code)
+    if not plan_result.get("success"):
+        logger.warning(
+            "[recon][rerun] 读取运行计划失败，无法回退 biz_date: plan_code=%s error=%s",
+            run_plan_code,
+            plan_result.get("error"),
+        )
+        return ""
+    plan = _safe_dict(plan_result.get("plan") or plan_result.get("run_plan"))
+    trigger_date = _extract_run_trigger_date(source_run, run_context)
+    if not trigger_date:
+        return ""
+    offset_days = _normalize_biz_date_offset(str(plan.get("biz_date_offset") or "t-1"))
+    return _shift_biz_date(trigger_date, offset_days)
+
+
 def _materialize_binding_query(binding: dict[str, Any], *, biz_date: str) -> dict[str, Any]:
     resolved_query = _safe_dict(_resolve_query_placeholders(_safe_dict(binding.get("query")), biz_date=biz_date))
     biz_date_filter = _safe_dict(resolved_query.pop("biz_date_filter", None))
@@ -874,6 +933,13 @@ async def prepare_execution_run_rerun(
         or ""
     ).strip()
     run_plan_code = str(source_run.get("plan_code") or run_context.get("run_plan_code") or "").strip()
+    if not biz_date:
+        biz_date = await _recover_rerun_biz_date_from_plan(
+            auth_token,
+            source_run=source_run,
+            run_context=run_context,
+            run_plan_code=run_plan_code,
+        )
 
     exception: dict[str, Any] = {}
     exception_ref = str(exception_id or "").strip()
@@ -923,6 +989,7 @@ async def prepare_execution_run_rerun(
             "retry_reason": retry_reason,
             "rerun_reason": retry_reason,
             "trigger_type": "rerun",
+            "biz_date": biz_date,
         }
     )
     return {

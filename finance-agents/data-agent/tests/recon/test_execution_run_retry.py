@@ -103,6 +103,47 @@ async def test_prepare_execution_run_rerun_builds_in_place_context(
     assert result["source_run"]["id"] == "run-1"
 
 
+@pytest.mark.asyncio
+async def test_prepare_execution_run_rerun_recovers_biz_date_from_plan_offset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_run = _source_run(status="failed")
+    source_run.pop("biz_date", None)
+    source_run["source_snapshot_json"] = {}
+    source_run["run_context_json"].pop("biz_date", None)
+    source_run["run_context_json"].update(
+        {
+            "schedule_slot": "daily:2026-06-10T12:15",
+            "scheduler_triggered_at": "2026-06-10T12:15:00+08:00",
+        }
+    )
+
+    async def fake_execution_run_get(auth_token: str, run_id: str) -> dict[str, Any]:
+        return {"success": True, "run": source_run}
+
+    async def fake_execution_run_plan_get(
+        auth_token: str,
+        *,
+        plan_id: str = "",
+        plan_code: str = "",
+    ) -> dict[str, Any]:
+        assert plan_code == "plan-1"
+        return {"success": True, "plan": {"plan_code": "plan-1", "biz_date_offset": "T-1"}}
+
+    monkeypatch.setattr(auto_run_service, "execution_run_get", fake_execution_run_get)
+    monkeypatch.setattr(auto_run_service, "execution_run_plan_get", fake_execution_run_plan_get)
+
+    result = await auto_run_service.prepare_execution_run_rerun(
+        auth_token="token",
+        original_run_id="run-1",
+        reason="用户触发重试",
+    )
+
+    assert result["success"] is True
+    assert result["biz_date"] == "2026-06-09"
+    assert result["run_context"]["biz_date"] == "2026-06-09"
+
+
 def test_append_retry_history_keeps_latest_20() -> None:
     source_run = _source_run(
         retry_history=[{"attempt": index} for index in range(25)],
