@@ -45,7 +45,7 @@ async def test_controller_open_starts_online_agent_and_revokes_previous(monkeypa
                     "profile_key": "店铺A",
                     "reason": "RISK_VERIFICATION",
                     "status": "pending",
-                    "expires_at": "2026-05-25T12:00:00Z",
+                    "expires_at": "2099-01-01T00:00:00Z",
                 },
             }
         if tool == "browser_handoff_session_control_open":
@@ -59,7 +59,7 @@ async def test_controller_open_starts_online_agent_and_revokes_previous(monkeypa
                     "reason": "RISK_VERIFICATION",
                     "status": "active",
                     "controller_id": args["controller_id"],
-                    "expires_at": "2026-05-25T12:00:00Z",
+                    "expires_at": "2099-01-01T00:00:00Z",
                 },
             }
         return {"success": True}
@@ -99,7 +99,7 @@ async def test_controller_open_waits_when_agent_offline(monkeypatch):
                     "profile_key": "店铺A",
                     "reason": "RISK_VERIFICATION",
                     "status": "pending",
-                    "expires_at": "2026-05-25T12:00:00Z",
+                    "expires_at": "2099-01-01T00:00:00Z",
                 },
             }
         if tool == "browser_handoff_session_control_open":
@@ -110,7 +110,7 @@ async def test_controller_open_waits_when_agent_offline(monkeypatch):
                     "handoff_session_id": "h1",
                     "agent_id": "agent-A",
                     "status": "waiting_agent",
-                    "expires_at": "2026-05-25T12:00:00Z",
+                    "expires_at": "2099-01-01T00:00:00Z",
                 },
             }
         raise AssertionError(tool)
