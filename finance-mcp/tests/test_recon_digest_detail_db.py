@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import json
 import math
 from datetime import date, datetime
 from decimal import Decimal
@@ -248,18 +249,53 @@ def test_bundle_resolves_drilldown_aging_threshold_from_structured(monkeypatch) 
     )
 
 
-def test_total_net_deduction_rate_uses_net_receivable_settled_denominator(monkeypatch) -> None:
+def test_public_digest_detail_hides_unavailable_net_deduction_metrics(monkeypatch) -> None:
     rows = {
         "digest": {
             "id": "digest-001",
             "company_id": "company-001",
-            "structured": {"domain": "ecom"},
+            "structured": {
+                "domain": "ecom",
+                "totals": {
+                    "settled_total": 90,
+                    "net_deduction_total": 10,
+                    "net_deduction_rate": 0.1,
+                },
+            },
         },
         "layout": {
             "layout_code": "layout",
             "domain": "ecom",
             "view": "finance",
-            "sections": [],
+            "sections": [
+                {
+                    "type": "metric_kpi",
+                    "title": "资金概览",
+                    "metric_label_map": {
+                        "settled_total": "已到账",
+                        "net_deduction_total": "综合扣减额",
+                        "net_deduction_rate": "综合扣减率",
+                    },
+                    "metrics": [
+                        "settled_total",
+                        "net_deduction_total",
+                        "net_deduction_rate",
+                    ],
+                },
+                {
+                    "type": "ranking_table",
+                    "title": "扣减率排名",
+                    "metric_label_map": {
+                        "net_deduction_total": "综合扣减额",
+                        "net_deduction_rate": "综合扣减率",
+                    },
+                    "columns": [
+                        "net_deduction_total",
+                        "net_deduction_rate",
+                    ],
+                    "sort": "net_deduction_rate desc",
+                },
+            ],
             "version": 1,
         },
         "rollups": [
@@ -267,6 +303,7 @@ def test_total_net_deduction_rate_uses_net_receivable_settled_denominator(monkey
                 "plan_code": "p1",
                 "settled_amount_total": Decimal("90"),
                 "net_deduction_total": Decimal("10"),
+                "net_deduction_rate": Decimal("0.1"),
             }
         ],
         "lines": [],
@@ -283,7 +320,23 @@ def test_total_net_deduction_rate_uses_net_receivable_settled_denominator(monkey
     )
 
     assert bundle is not None
-    assert bundle["data"]["totals"]["net_deduction_rate"] == 0.1
+    assert "net_deduction_total" not in bundle["data"]["totals"]
+    assert "net_deduction_rate" not in bundle["data"]["totals"]
+    assert "net_deduction_total" not in bundle["data"]["rollups"][0]
+    assert "net_deduction_rate" not in bundle["data"]["rollups"][0]
+    assert "net_deduction_total" not in bundle["digest"]["structured"]["totals"]
+    assert "net_deduction_rate" not in bundle["digest"]["structured"]["totals"]
+
+    sections = bundle["layout"]["sections"]
+    assert sections == [
+        {
+            "type": "metric_kpi",
+            "title": "资金概览",
+            "metric_label_map": {"settled_total": "已到账"},
+            "metrics": ["settled_total"],
+        }
+    ]
+    assert "综合扣减" not in json.dumps(bundle["layout"], ensure_ascii=False)
 
 
 def test_public_digest_totals_use_delivered_snapshot_when_rollup_changes(monkeypatch) -> None:

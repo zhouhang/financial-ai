@@ -354,10 +354,6 @@ def _compose_digest_message(
                     f"正常在途 {_format_money(totals.get('normal_in_transit_amount'))} ｜ "
                     f"待核查 {_format_money(totals.get('stuck_amount'))}"
                 ),
-                (
-                    "平台综合扣减\n"
-                    f"{_format_money(totals.get('net_deduction_total'))}"
-                ),
                 narrative,
                 f"[查看完整明细]({detail_url})",
             ]
@@ -376,7 +372,6 @@ def _compose_digest_message(
             (
                 "资金归因\n"
                 f"正常在途 {_format_money(totals.get('normal_in_transit_amount'))} | "
-                f"综合扣减 {_format_money(totals.get('net_deduction_total'))} | "
                 f"退款 {_format_money(totals.get('refund_total'))} | "
                 f"待核查 {_format_money(totals.get('stuck_amount'))}"
             ),

@@ -236,6 +236,8 @@ def test_finalize_upserts_digest_when_gate_and_rollup_are_complete(monkeypatch) 
     json.dumps(structured_payload, ensure_ascii=False)
     json.dumps(completeness_payload, ensure_ascii=False)
     assert structured_payload["stuck_alerts"][0]["amount"] == 5
+    assert "net_deduction_total" not in structured_payload["totals"]
+    assert "net_deduction_rate" not in structured_payload["totals"]
     assert completeness_payload["plans"][0]["run_context_json"] == {
         "biz_date": "2026-06-05",
         "amount": 12.5,

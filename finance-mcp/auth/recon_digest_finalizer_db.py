@@ -476,15 +476,12 @@ def _build_structured(
             _as_float(row.get("normal_in_transit_amount_total")) for row in rollups
         ),
         "stuck_amount": sum(_as_float(row.get("stuck_amount_total")) for row in rollups),
-        "net_deduction_total": sum(_as_float(row.get("net_deduction_total")) for row in rollups),
         "matched_with_diff_count": sum(
             _as_float(row.get("matched_with_diff_count")) for row in rollups
         ),
         "source_only_count": sum(_as_float(row.get("source_only_count")) for row in rollups),
         "target_only_count": sum(_as_float(row.get("target_only_count")) for row in rollups),
     }
-    settled_net = totals["settled_total"] + totals["net_deduction_total"]
-    totals["net_deduction_rate"] = _ratio(totals["net_deduction_total"], settled_net)
     totals["in_transit_ratio"] = _ratio(
         totals["normal_in_transit_amount"] + totals["stuck_amount"],
         totals["net_receivable_total"],

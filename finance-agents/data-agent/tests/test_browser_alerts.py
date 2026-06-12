@@ -159,6 +159,46 @@ def test_browser_alert_content_explains_agent_interrupted_in_plain_language() ->
     assert "处理建议: 确认是否刚执行过服务重启/发版；确认采集机在线后，重新采集或重新触发本次对账。" in content
 
 
+def test_missed_success_alerts_only_scan_browser_sources_referenced_by_enabled_runs(monkeypatch) -> None:
+    executed_sql: list[str] = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql: str, params=None) -> None:
+            executed_sql.append(sql)
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(browser_alerts.psycopg2, "connect", lambda *_args, **_kwargs: Connection())
+
+    browser_alerts.collect_browser_alert_events()
+
+    missed_success_sql = next(
+        sql
+        for sql in executed_sql
+        if "FROM shop_runtime_bindings b" in sql and "last_collection_at" in sql
+    )
+    assert "execution_run_plans" in missed_success_sql
+    assert "recon_auto_tasks" in missed_success_sql
+    assert "is_enabled = TRUE" in missed_success_sql
+
+
 def test_browser_alert_service_dedupes_existing_alert() -> None:
     adapter = FakeAdapter()
     service = BrowserAlertService(

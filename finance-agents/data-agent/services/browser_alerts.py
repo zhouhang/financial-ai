@@ -247,6 +247,32 @@ def collect_browser_alert_events(
                       AND b.profile_status = 'active'
                       AND b.playbook_status = 'ok'
                       AND (
+                          EXISTS (
+                              SELECT 1
+                              FROM execution_run_plans p
+                              WHERE p.company_id = b.company_id
+                                AND p.is_enabled = TRUE
+                                AND (
+                                    p.input_bindings_json::text ILIKE ('%%' || b.data_source_id::text || '%%')
+                                    OR p.plan_meta_json::text ILIKE ('%%' || b.data_source_id::text || '%%')
+                                    OR p.input_bindings_json::text ILIKE ('%%' || ds.code || '%%')
+                                    OR p.plan_meta_json::text ILIKE ('%%' || ds.code || '%%')
+                                )
+                          )
+                          OR EXISTS (
+                              SELECT 1
+                              FROM recon_auto_tasks t
+                              WHERE t.company_id = b.company_id
+                                AND t.is_enabled = TRUE
+                                AND (
+                                    t.bound_data_source_ids::text ILIKE ('%%' || b.data_source_id::text || '%%')
+                                    OR t.task_meta_json::text ILIKE ('%%' || b.data_source_id::text || '%%')
+                                    OR t.bound_data_source_ids::text ILIKE ('%%' || ds.code || '%%')
+                                    OR t.task_meta_json::text ILIKE ('%%' || ds.code || '%%')
+                                )
+                          )
+                      )
+                      AND (
                           b.last_collection_at IS NULL
                           OR b.last_collection_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 hour')
                       )
