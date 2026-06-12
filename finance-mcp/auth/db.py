@@ -10658,7 +10658,7 @@ def delete_execution_run_exceptions_by_run_id(*, company_id: str, run_id: str) -
         logger.error(
             f"删除 execution_run_exceptions 失败 (company_id={company_id}, run_id={run_id}): {e}"
         )
-        return 0
+        raise
 
 
 def list_execution_runs(

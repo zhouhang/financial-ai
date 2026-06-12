@@ -73,3 +73,30 @@ def test_exception_clear_by_run_delegates_to_auth_db(monkeypatch: pytest.MonkeyP
 
     assert result == {"success": True, "deleted_count": 7}
     assert captured == {"company_id": "company-1", "run_id": "run-1"}
+
+
+@pytest.mark.asyncio
+async def test_exception_clear_by_run_failure_returns_tool_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_require_user(auth_token: str) -> dict[str, str]:
+        assert auth_token == "token"
+        return _fake_user()
+
+    def fake_delete_execution_run_exceptions_by_run_id(**kwargs: Any) -> int:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(execution_runs, "_require_user", fake_require_user)
+    monkeypatch.setattr(
+        execution_runs.auth_db,
+        "delete_execution_run_exceptions_by_run_id",
+        fake_delete_execution_run_exceptions_by_run_id,
+    )
+
+    result = await execution_runs.handle_tool_call(
+        "execution_run_exception_clear_by_run",
+        {"auth_token": "token", "run_id": "run-1"},
+    )
+
+    assert result["success"] is False
+    assert "database unavailable" in result["error"]
