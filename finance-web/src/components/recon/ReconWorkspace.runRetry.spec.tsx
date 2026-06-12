@@ -162,7 +162,7 @@ describe('ReconWorkspace run retry actions', () => {
     expect(await screen.findByRole('button', { name: '差异消化' })).toBeTruthy();
   });
 
-  it('posts retry request and keeps polling until the original run leaves running state', async () => {
+  it('posts retry request and reloads exception details after the original run finishes', async () => {
     const fetchMock = setupFetch();
 
     await renderRunsTab();
@@ -183,6 +183,12 @@ describe('ReconWorkspace run retry actions', () => {
     await waitFor(() => {
       const runFetchCalls = fetchMock.mock.calls.filter(([input]) => String(input) === '/api/recon/runs/run-failed');
       expect(runFetchCalls).toHaveLength(2);
+    });
+    await waitFor(() => {
+      const exceptionFetchCalls = fetchMock.mock.calls.filter(([input]) => (
+        String(input) === '/api/recon/runs/run-failed/exceptions'
+      ));
+      expect(exceptionFetchCalls).toHaveLength(2);
     });
   });
 });

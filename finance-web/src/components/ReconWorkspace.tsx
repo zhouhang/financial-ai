@@ -5573,6 +5573,15 @@ export default function ReconWorkspace({
             ? { ...current, run: refreshedRun }
             : current
         ));
+        if (refreshedRun && !isRunInProgress(refreshedRun)) {
+          setExceptionsByRunId((prev) => {
+            if (!prev[runId]) return prev;
+            const next = { ...prev };
+            delete next[runId];
+            return next;
+          });
+          void loadRunExceptions(runId);
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : '发起重试失败';
         setCenterError(message);
@@ -5581,7 +5590,7 @@ export default function ReconWorkspace({
         setRetryingRunId((current) => (current === runId ? null : current));
       }
     },
-    [authToken, loadRunsPage, refreshRunQuietly, runsPage],
+    [authToken, loadRunExceptions, loadRunsPage, refreshRunQuietly, runsPage],
   );
 
   const renderRunPrimaryActionButton = (run: ReconCenterRunItem) => {
