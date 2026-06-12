@@ -1391,7 +1391,20 @@ async def rerun_execution_run_api(
         run_context=run_context,
     )
     if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
+        source_run = _safe_dict(prepare_result.get("source_run"))
+        restore_payload = {
+            "execution_status": "failed",
+            "failed_stage": str(source_run.get("failed_stage") or "rerun_enqueue"),
+            "failed_reason": str(source_run.get("failed_reason") or result.get("error") or "入队失败"),
+            "run_context_json": run_context,
+            "finished_at_now": True,
+        }
+        restore_result = await execution_run_update(auth_token, target_run_id, restore_payload)
+        detail = {
+            "message": result.get("error") or "入队失败",
+            "restore_error": restore_result.get("error") if not restore_result.get("success") else "",
+        }
+        raise HTTPException(status_code=500, detail=detail)
 
     return {
         "queued": True,
