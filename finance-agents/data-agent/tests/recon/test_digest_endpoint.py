@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock
 
 import jwt
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 # ── 路径注入 ────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parents[2]  # finance-agents/data-agent
@@ -50,6 +52,13 @@ def _auth_header() -> str:
     return f"Bearer {token}"
 
 
+@pytest.fixture
+def client() -> TestClient:
+    app = FastAPI()
+    app.include_router(auto_run_api.router, prefix="/api")
+    return TestClient(app)
+
+
 def _make_run(
     run_id: str = "run-abc",
     biz_date_in_run_context: str = "2026-06-01",
@@ -72,6 +81,22 @@ def _make_run(
         "run_context_json": run_context_json,
         "source_snapshot_json": source_snapshot_json,
         "execution_status": "success",
+    }
+
+
+def _make_execution_run_for_rerun(status: str = "failed") -> dict[str, object]:
+    return {
+        "id": "run-failed-1",
+        "plan_code": "plan-1",
+        "biz_date": "2026-06-10",
+        "execution_status": status,
+        "failed_stage": "recon",
+        "failed_reason": "原失败原因",
+        "finished_at": "2026-06-10T09:00:00+08:00",
+        "run_context_json": {
+            "biz_date": "2026-06-10",
+            "run_plan_code": "plan-1",
+        },
     }
 
 
@@ -299,3 +324,94 @@ def test_digest_run_diffs_api_returns_404_for_missing_run(
         )
 
     assert exc.value.status_code == 404
+
+
+def test_rerun_execution_run_rejects_active_duplicate(client, monkeypatch):
+    async def fake_prepare_execution_run_rerun(**kwargs):
+        return {
+            "success": True,
+            "run_plan_code": "plan-1",
+            "biz_date": "2026-06-10",
+            "source_run": _make_execution_run_for_rerun(),
+            "run_context": {
+                "target_run_id": "run-failed-1",
+                "execution_run_id": "run-failed-1",
+                "retry_from_failed_run_id": "run-failed-1",
+                "retry_reason": "用户触发重试",
+                "trigger_type": "rerun",
+            },
+        }
+
+    async def fake_recon_queue_find_active(**kwargs):
+        return {"success": True, "job": {"id": "job-1", "status": "queued"}}
+
+    async def fake_recon_queue_enqueue(**kwargs):
+        raise AssertionError("duplicate active retry must not enqueue")
+
+    monkeypatch.setattr(auto_run_api, "prepare_execution_run_rerun", fake_prepare_execution_run_rerun)
+    monkeypatch.setattr(auto_run_api, "recon_queue_find_active", fake_recon_queue_find_active)
+    monkeypatch.setattr(auto_run_api, "recon_queue_enqueue", fake_recon_queue_enqueue)
+
+    response = client.post(
+        "/api/recon/runs/rerun",
+        headers={"Authorization": _auth_header()},
+        json={"original_run_id": "run-failed-1", "reason": "用户触发重试"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["message"] == "该运行记录正在重试,请稍后"
+
+
+def test_rerun_execution_run_marks_original_run_running(client, monkeypatch):
+    captured_enqueue = {}
+    captured_update = {}
+
+    async def fake_prepare_execution_run_rerun(**kwargs):
+        return {
+            "success": True,
+            "run_plan_code": "plan-1",
+            "biz_date": "2026-06-10",
+            "source_run": _make_execution_run_for_rerun(),
+            "run_context": {
+                "target_run_id": "run-failed-1",
+                "execution_run_id": "run-failed-1",
+                "retry_from_failed_run_id": "run-failed-1",
+                "retry_reason": "用户触发重试",
+                "trigger_type": "rerun",
+            },
+        }
+
+    async def fake_recon_queue_find_active(**kwargs):
+        return {"success": True, "job": None}
+
+    async def fake_recon_queue_enqueue(**kwargs):
+        captured_enqueue.update(kwargs)
+        return {"success": True, "job": {"id": "job-1", "status": "queued"}}
+
+    async def fake_execution_run_update(auth_token, run_id, payload):
+        captured_update.update({"auth_token": auth_token, "run_id": run_id, "payload": payload})
+        return {"success": True, "run": {"id": run_id, "execution_status": "running"}}
+
+    monkeypatch.setattr(auto_run_api, "prepare_execution_run_rerun", fake_prepare_execution_run_rerun)
+    monkeypatch.setattr(auto_run_api, "recon_queue_find_active", fake_recon_queue_find_active)
+    monkeypatch.setattr(auto_run_api, "recon_queue_enqueue", fake_recon_queue_enqueue)
+    monkeypatch.setattr(auto_run_api, "execution_run_update", fake_execution_run_update)
+
+    response = client.post(
+        "/api/recon/runs/rerun",
+        headers={"Authorization": _auth_header()},
+        json={"original_run_id": "run-failed-1", "reason": "用户触发重试"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["queued"] is True
+    assert captured_enqueue["trigger_mode"] == "rerun"
+    assert captured_enqueue["run_context"]["target_run_id"] == "run-failed-1"
+    assert captured_enqueue["run_context"]["execution_run_id"] == "run-failed-1"
+    assert captured_update["run_id"] == "run-failed-1"
+    assert captured_update["payload"]["execution_status"] == "running"
+    assert captured_update["payload"]["failed_stage"] == ""
+    assert captured_update["payload"]["failed_reason"] == ""
+    assert captured_update["payload"]["restart_started_at_now"] is True
+    assert captured_update["payload"]["reset_finished_at"] is True
+    assert captured_update["payload"]["run_context_json"]["retry_history"][-1]["previous_status"] == "failed"

@@ -11,6 +11,7 @@ import jwt
 from pydantic import BaseModel, Field
 
 from graphs.recon.auto_run_service import (
+    append_execution_run_retry_history,
     execute_run_plan_run,
     execute_auto_task_run,
     finalize_and_deliver_daily_digest,
@@ -43,6 +44,7 @@ from tools.mcp_client import (
     execution_run_get,
     execution_run_list,
     execution_run_public_exception_bundle,
+    execution_run_update,
     execution_run_plan_create,
     execution_run_plan_delete,
     execution_run_plan_get,
@@ -1326,32 +1328,76 @@ async def rerun_execution_run_api(
             status_code=400 if status not in {"not_found"} else 404,
             detail={
                 "status": status,
-                "message": prepare_result.get("error") or "重新对账验证暂不可用",
+                "message": prepare_result.get("error") or "重试暂不可用",
                 "todo": prepare_result.get("todo") or "",
             },
         )
+
+    target_run_id = str(
+        _safe_dict(prepare_result.get("run_context")).get("target_run_id")
+        or prepare_result.get("source_run_id")
+        or body.original_run_id
+        or ""
+    ).strip()
+    active_result = await recon_queue_find_active(
+        company_id=str(user["company_id"]),
+        trigger_mode="rerun",
+        target_run_id=target_run_id,
+    )
+    if active_result.get("job") or active_result.get("found"):
+        raise HTTPException(
+            status_code=409,
+            detail={"status": "conflict", "message": "该运行记录正在重试,请稍后"},
+        )
+
+    trigger_user = _build_trigger_user_context(user)
+    run_context = _merge_trigger_user_context(
+        dict(prepare_result.get("run_context") or {}),
+        user,
+    )
+    run_context = append_execution_run_retry_history(
+        run_context,
+        source_run=_safe_dict(prepare_result.get("source_run")),
+        reason=body.reason,
+        trigger_user=trigger_user,
+    )
 
     result = await recon_queue_enqueue(
         company_id=str(user["company_id"]),
         run_plan_code=str(prepare_result.get("run_plan_code") or ""),
         biz_date=str(prepare_result.get("biz_date") or ""),
         trigger_mode="rerun",
-        run_context=_merge_trigger_user_context(
-            dict(prepare_result.get("run_context") or {}),
-            user,
-        ),
+        run_context=run_context,
     )
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
+
+    update_result = await execution_run_update(
+        auth_token,
+        target_run_id,
+        {
+            "execution_status": "running",
+            "failed_stage": "",
+            "failed_reason": "",
+            "run_context_json": run_context,
+            "started_at_now": True,
+            "restart_started_at_now": True,
+            "reset_finished_at": True,
+        },
+    )
+    if not update_result.get("success"):
+        raise HTTPException(status_code=500, detail=update_result.get("error", "更新运行记录失败"))
+
     return {
         "queued": True,
         "status": "queued",
         "job_id": str((result.get("job") or {}).get("id") or ""),
         "source_run_id": prepare_result.get("source_run_id") or body.original_run_id,
+        "target_run_id": target_run_id,
         "exception_id": prepare_result.get("exception_id") or body.exception_id,
         "run_plan_code": prepare_result.get("run_plan_code") or "",
         "biz_date": prepare_result.get("biz_date") or "",
-        "message": "重新对账验证已进入执行队列，请稍后查询运行结果",
+        "message": "重试已进入执行队列，请稍后查询运行结果",
     }
 
 

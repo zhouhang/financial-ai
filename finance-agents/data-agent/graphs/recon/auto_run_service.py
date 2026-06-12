@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from graphs.recon.auto_scheme_run import run_auto_scheme_run_graph
@@ -843,11 +843,7 @@ async def prepare_execution_run_rerun(
     exception_id: str = "",
     reason: str = "",
 ) -> dict[str, Any]:
-    """Validate and build the minimal context required to rerun recon validation.
-
-    This does not claim a new run was created. The caller may enqueue
-    execute_run_plan_run only when this returns status=ready.
-    """
+    """Validate and build in-place retry context for a failed execution run."""
     source_run_id = str(original_run_id or "").strip()
     if not source_run_id:
         return {"success": False, "status": "todo", "error": "original_run_id 不能为空"}
@@ -861,6 +857,15 @@ async def prepare_execution_run_rerun(
         }
 
     source_run = _safe_dict(run_result.get("run"))
+    execution_status = str(source_run.get("execution_status") or "").strip().lower()
+    if execution_status != "failed":
+        return {
+            "success": False,
+            "status": "invalid_request",
+            "error": "只有执行失败的运行记录可以重试",
+            "source_run": source_run,
+        }
+
     run_context = _safe_dict(source_run.get("run_context_json"))
     biz_date = str(
         source_run.get("biz_date")
@@ -886,14 +891,14 @@ async def prepare_execution_run_rerun(
             return {
                 "success": False,
                 "status": "invalid_request",
-                "error": "exception_id 不属于 original_run_id，无法重新对账验证",
+                "error": "exception_id 不属于 original_run_id，无法重试",
             }
 
     if not run_plan_code:
         return {
             "success": False,
             "status": "todo",
-            "error": "原运行缺少 plan_code，暂不能创建重新对账验证流程",
+            "error": "原运行缺少 plan_code，暂不能创建重试流程",
             "todo": "补齐 execution_run 到 execution_run_plan 的反查能力后再启用",
             "source_run": source_run,
         }
@@ -901,18 +906,23 @@ async def prepare_execution_run_rerun(
         return {
             "success": False,
             "status": "todo",
-            "error": "原运行缺少 biz_date，暂不能创建重新对账验证流程",
+            "error": "原运行缺少 biz_date，暂不能创建重试流程",
             "todo": "补齐运行上下文中的业务日期恢复逻辑后再启用",
             "source_run": source_run,
         }
 
+    retry_reason = str(reason or "用户触发重试").strip() or "用户触发重试"
     rerun_context = dict(run_context)
-    rerun_context.pop("run_id", None)
     rerun_context.update(
         {
+            "target_run_id": source_run_id,
+            "execution_run_id": source_run_id,
+            "retry_from_failed_run_id": source_run_id,
             "rerun_from_run_id": source_run_id,
             "rerun_exception_id": exception_ref,
-            "rerun_reason": str(reason or "重新对账验证").strip() or "重新对账验证",
+            "retry_reason": retry_reason,
+            "rerun_reason": retry_reason,
+            "trigger_type": "rerun",
         }
     )
     return {
@@ -926,6 +936,36 @@ async def prepare_execution_run_rerun(
         "source_run": source_run,
         "exception": exception,
     }
+
+
+def append_execution_run_retry_history(
+    run_context: dict[str, Any],
+    *,
+    source_run: dict[str, Any],
+    reason: str,
+    trigger_user: dict[str, Any],
+    attempted_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Append a retry audit entry to run_context, preserving only the latest 20."""
+    attempted = attempted_at or datetime.now(timezone.utc)
+    if attempted.tzinfo is None:
+        attempted = attempted.replace(tzinfo=timezone.utc)
+
+    result = dict(run_context or {})
+    history = _safe_list(result.get("retry_history"))
+    history.append(
+        {
+            "attempted_at": attempted.isoformat(),
+            "reason": str(reason or "").strip(),
+            "trigger_user": _safe_dict(trigger_user),
+            "previous_status": str(source_run.get("execution_status") or "").strip(),
+            "previous_failed_stage": str(source_run.get("failed_stage") or "").strip(),
+            "previous_failed_reason": str(source_run.get("failed_reason") or "").strip(),
+            "previous_finished_at": str(source_run.get("finished_at") or "").strip(),
+        }
+    )
+    result["retry_history"] = history[-20:]
+    return result
 
 
 _COMMON_FIELD_LABELS: dict[str, str] = {

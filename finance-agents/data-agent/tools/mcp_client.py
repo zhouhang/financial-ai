@@ -1173,6 +1173,13 @@ async def execution_run_exception_bulk_update_by_owner(
     )
 
 
+async def execution_run_exception_clear_by_run(auth_token: str, run_id: str) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "execution_run_exception_clear_by_run",
+        {"auth_token": auth_token, "run_id": run_id},
+    )
+
+
 async def execution_run_exception_list_pending_todo_batches(
     auth_token: str,
     *,
