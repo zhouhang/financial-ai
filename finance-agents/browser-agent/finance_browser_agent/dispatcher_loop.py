@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from datetime import date
 from typing import Any
 
 from finance_browser_agent.credentials import inject_credentials_into_params
@@ -32,6 +33,11 @@ from finance_browser_agent.playwright_runner import sanitize_profile_key
 from finance_browser_agent.profile_locks import ProfileLockRegistry
 
 logger = logging.getLogger(__name__)
+
+# Per-shop AUTH_EXPIRED notification dedup: shop_id → date of last notification.
+# A single shop often has two dataset jobs that both fail with AUTH_EXPIRED on the
+# same day; we only want to send one handoff notification per shop per day.
+_AUTH_EXPIRED_NOTIFIED: dict[str, date] = {}
 
 
 class BrowserDispatcherLoop:
@@ -159,6 +165,40 @@ class BrowserDispatcherLoop:
         result = result if isinstance(result, dict) else {}
         policy = classify_failure(str(result.get("fail_reason") or "OTHER"))
         error_message = str((result.get("error_info") or {}).get("message") or "browser task failed")
+
+        # AUTH_EXPIRED: fire a handoff notification so someone can re-login via
+        # the remote-control link.  Dedup per shop per day because the same shop
+        # typically has two dataset jobs that both fail on the same day.
+        if policy.normalized_reason == "AUTH_EXPIRED":
+            shop_id_str = str(job.get("shop_id") or "")
+            today = date.today()
+            if _AUTH_EXPIRED_NOTIFIED.get(shop_id_str) != today:
+                _AUTH_EXPIRED_NOTIFIED[shop_id_str] = today
+                try:
+                    await self.client.report_risk_waiting(
+                        sync_job_id=sync_job_id,
+                        reason="AUTH_EXPIRED",
+                        company_id=str(job.get("company_id") or ""),
+                        shop_id=shop_id_str,
+                        data_source_id=str(job.get("data_source_id") or ""),
+                    )
+                    logger.info(
+                        "browser auth expired notification sent: sync_job_id=%s shop_id=%s",
+                        sync_job_id,
+                        shop_id_str,
+                    )
+                except Exception:
+                    logger.exception(
+                        "browser auth expired notification failed: sync_job_id=%s", sync_job_id
+                    )
+            else:
+                logger.info(
+                    "browser auth expired notification deduped (already sent today): "
+                    "sync_job_id=%s shop_id=%s",
+                    sync_job_id,
+                    shop_id_str,
+                )
+
         await self.client.mark_browser_job_failed(
             {
                 "sync_job_id": sync_job_id,

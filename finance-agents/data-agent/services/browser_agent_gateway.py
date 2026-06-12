@@ -71,6 +71,14 @@ def _build_handoff_link(token: str) -> str:
     return f"{base}/handoff?t={token}" if base else f"/handoff?t={token}"
 
 
+
+def _handoff_reason_label(reason: str) -> str:
+    """Return a human-readable label for the handoff reason used in notifications."""
+    if reason == "AUTH_EXPIRED":
+        return "千牛登录已过期，请点击链接远程接管重新登录"
+    return "采集店铺需要人工验证，请打开链接完成验证后点击“我已完成验证”"
+
+
 def _notify_handoff_fallback(
     *, company_id: str, sync_job_id: str, shop_id: str, reason: str, link: str
 ) -> bool:
@@ -191,10 +199,9 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
                     if target:
                         adapter.send_bot_message(
                             content=(
-                                "采集店铺需要人工验证。\n\n"
-                                f"原因：{reason}\n\n"
+                                f"{_handoff_reason_label(reason)}\n\n"
                                 f"[打开验证链接]({link})\n\n"
-                                "完成验证后请点击页面底部“我已完成验证”。"
+                                "完成后请点击页面底部“我已完成验证”。"
                             ),
                             content_type="markdown",
                             title="Tally 浏览器人工验证",
