@@ -63,6 +63,34 @@ def _ready_finalize_result() -> dict:
     }
 
 
+def test_compose_finance_digest_message_omits_unavailable_net_deduction_metric() -> None:
+    title, content = service._compose_digest_message(
+        digest={
+            "period_start": "2026-06-05",
+            "structured": {
+                "totals": {
+                    "matched_with_diff_count": 2,
+                    "source_only_count": 1,
+                    "target_only_count": 0,
+                    "normal_in_transit_amount": 5,
+                    "refund_total": 10,
+                    "stuck_amount": 3,
+                    "net_deduction_total": 99,
+                }
+            },
+            "narrative": "日报说明",
+        },
+        subscription={"view": "finance"},
+        detail_url="https://www.tallyai.cn/recon/digests/token/finance",
+    )
+
+    assert title == "2026-06-05 对账明细"
+    assert "资金归因" in content
+    assert "综合扣减" not in content
+    assert "¥99" not in content
+    assert "查看差异清单/导出底稿" in content
+
+
 @pytest.mark.asyncio
 async def test_finalize_and_deliver_digest_dry_run_does_not_send(
     monkeypatch: pytest.MonkeyPatch,
@@ -100,6 +128,7 @@ async def test_finalize_and_deliver_digest_dry_run_does_not_send(
 
     assert result["deliveries"][0]["status"] == "dry_run"
     assert "查看完整明细" in result["deliveries"][0]["content"]
+    assert "综合扣减" not in result["deliveries"][0]["content"]
 
 
 @pytest.mark.asyncio
@@ -158,6 +187,7 @@ async def test_finalize_and_deliver_digest_sends_and_records_delivery(
     assert result["delivered_count"] == 1
     assert sent_calls[0]["to_user_id"] == "u1"
     assert sent_calls[0]["content_type"] == "markdown"
+    assert "综合扣减" not in sent_calls[0]["content"]
     assert link_calls[0]["company_id"] == "company-001"
     assert delivery_calls[0]["status"] == "sent"
     assert delivery_calls[0]["message_id"] == "msg-001"

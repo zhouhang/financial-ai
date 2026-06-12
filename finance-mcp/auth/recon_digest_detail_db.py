@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_VIEWS = {"boss", "finance"}
 _DEFAULT_STUCK_DAYS_N = 3
+_UNAVAILABLE_DISPLAY_METRICS = {"net_deduction_total", "net_deduction_rate"}
 
 
 def _rows(cur) -> list[dict[str, Any]]:
@@ -96,6 +97,90 @@ def _apply_stuck_threshold(layout: dict[str, Any], stuck_days_n: int) -> dict[st
     return patched
 
 
+def _without_unavailable_metrics(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if key not in _UNAVAILABLE_DISPLAY_METRICS}
+
+
+def _filter_metric_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        str(item)
+        for item in value
+        if str(item) and str(item) not in _UNAVAILABLE_DISPLAY_METRICS
+    ]
+
+
+def _filter_stages(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    stages: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        metric = str(item.get("metric") or "")
+        if metric and metric not in _UNAVAILABLE_DISPLAY_METRICS:
+            stages.append(item)
+    return stages
+
+
+def _filter_unavailable_metrics_from_layout(layout: dict[str, Any]) -> dict[str, Any]:
+    """Remove metrics whose current data contract cannot produce a trustworthy value."""
+    patched = copy.deepcopy(layout)
+    sections = patched.get("sections")
+    if not isinstance(sections, list):
+        return patched
+
+    filtered_sections: list[dict[str, Any]] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        section = copy.deepcopy(section)
+
+        if isinstance(section.get("metric_label_map"), dict):
+            section["metric_label_map"] = _without_unavailable_metrics(section["metric_label_map"])
+        if "metrics" in section:
+            section["metrics"] = _filter_metric_list(section.get("metrics"))
+        if "columns" in section:
+            section["columns"] = _filter_metric_list(section.get("columns"))
+        if "stages" in section:
+            section["stages"] = _filter_stages(section.get("stages"))
+        sort_parts = str(section.get("sort") or "").split()
+        if sort_parts and sort_parts[0] in _UNAVAILABLE_DISPLAY_METRICS:
+            section.pop("sort", None)
+
+        drilldown = section.get("drilldown")
+        if isinstance(drilldown, dict):
+            if isinstance(drilldown.get("metric_label_map"), dict):
+                drilldown["metric_label_map"] = _without_unavailable_metrics(
+                    drilldown["metric_label_map"]
+                )
+            if "columns" in drilldown:
+                drilldown["columns"] = _filter_metric_list(drilldown.get("columns"))
+
+        section_type = str(section.get("type") or "")
+        if section_type in {"metric_kpi"} and not section.get("metrics"):
+            continue
+        if section_type in {"ranking_table", "distribution"} and not (
+            section.get("columns") or section.get("metrics")
+        ):
+            continue
+        if section_type == "funnel" and not section.get("stages"):
+            continue
+        filtered_sections.append(section)
+
+    patched["sections"] = filtered_sections
+    return patched
+
+
+def _filter_unavailable_metrics_from_structured(structured: dict[str, Any]) -> dict[str, Any]:
+    patched = copy.deepcopy(structured)
+    totals = _as_dict(patched.get("totals"))
+    if totals:
+        patched["totals"] = _without_unavailable_metrics(totals)
+    return patched
+
+
 _ROLLUP_ALIAS = {
     "receivable_total": "receivable_amount_total",
     "refund_total": "refund_amount_total",
@@ -103,8 +188,6 @@ _ROLLUP_ALIAS = {
     "settled_total": "settled_amount_total",
     "normal_in_transit_amount": "normal_in_transit_amount_total",
     "stuck_amount": "stuck_amount_total",
-    "net_deduction_total": "net_deduction_total",
-    "net_deduction_rate": "net_deduction_rate",
     "matched_with_diff_count": "matched_with_diff_count",
     "source_only_count": "source_only_count",
     "target_only_count": "target_only_count",
@@ -117,7 +200,6 @@ _SUMMABLE_TOTALS = [
     "settled_total",
     "normal_in_transit_amount",
     "stuck_amount",
-    "net_deduction_total",
     "matched_exact_count",
     "matched_with_diff_count",
     "source_only_count",
@@ -178,11 +260,6 @@ def _compute_totals(normalized_rollups: list[dict[str, Any]]) -> dict[str, Any]:
     for metric_code in _SUMMABLE_TOTALS:
         totals[metric_code] = sum(_num(row, metric_code) for row in normalized_rollups)
 
-    settled_net_receivable = totals["settled_total"] + totals["net_deduction_total"]
-    totals["net_deduction_rate"] = _ratio(
-        totals["net_deduction_total"],
-        settled_net_receivable,
-    )
     in_transit_amount = totals["normal_in_transit_amount"] + totals["stuck_amount"]
     totals["in_transit_ratio"] = _ratio(
         in_transit_amount,
@@ -198,7 +275,7 @@ def _compute_totals(normalized_rollups: list[dict[str, Any]]) -> dict[str, Any]:
 def _snapshot_totals(structured: dict[str, Any]) -> dict[str, Any]:
     """Return immutable digest totals captured at delivery time when available."""
     totals = _as_dict(structured.get("totals"))
-    return _json_safe(totals) if totals else {}
+    return _without_unavailable_metrics(_json_safe(totals)) if totals else {}
 
 
 def _merge_snapshot_totals(
@@ -335,7 +412,10 @@ def get_public_digest_detail_bundle(
                 if not digest:
                     return None
 
-                structured = _as_dict(digest.get("structured"))
+                structured = _filter_unavailable_metrics_from_structured(
+                    _as_dict(digest.get("structured"))
+                )
+                digest["structured"] = structured
                 normalized_domain = requested_domain or str(
                     structured.get("domain") or ""
                 ).strip()
@@ -357,6 +437,7 @@ def get_public_digest_detail_bundle(
                 if not layout:
                     return None
                 layout = _apply_stuck_threshold(layout, _resolve_stuck_days_n(structured))
+                layout = _filter_unavailable_metrics_from_layout(layout)
 
                 rollup_sql = _append_scope_filters(
                     """
