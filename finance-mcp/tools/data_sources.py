@@ -7712,6 +7712,9 @@ async def _handle_data_source_list_dataset_candidates(arguments: dict[str, Any])
                 **_build_dataset_view(row, include_heavy=False),
                 "field_label_map": semantic_flat["field_label_map"],
                 "semantic_fields": semantic_flat["semantic_fields"],
+                # lightweight 视图剥掉了 metadata,这里单独透出缓存样本(≤10 行)——
+                # 向导"选中数据集即显示缓存行"依赖它,缺了就退化成每次多发一次 preview 请求
+                "preview_sample": _extract_preview_sample(row),
                 "score": score,
                 "reason": reason,
                 "contract_label": candidate_contract.get("label") or "",

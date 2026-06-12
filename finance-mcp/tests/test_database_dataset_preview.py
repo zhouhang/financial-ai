@@ -748,3 +748,34 @@ def test_dataset_detail_tool_is_registered_and_routed():
     required = set(detail_tool.inputSchema.get("required") or [])
     assert {"dataset_id", "dataset_code", "resource_key"} <= set(properties)
     assert "dataset_id" not in required
+
+
+@pytest.mark.anyio
+async def test_dataset_candidates_expose_preview_sample(monkeypatch):
+    """向导候选接口必须透出 preview_sample,否则前端'选中即显缓存行'是死路径。"""
+    preview_sample = {
+        "rows": [{"id": 7, "updated_at": "2026-06-11"}],
+        "limit": 10,
+        "row_count": 1,
+        "resource_key": "public.orders",
+        "order": "date_field_desc",
+        "order_field": "updated_at",
+    }
+    row = _dataset({"preview_sample": preview_sample})
+    row.update({"publish_status": "published", "status": "active", "is_enabled": True})
+
+    monkeypatch.setattr(data_sources, "_require_user", lambda token: {"company_id": "company-1"})
+    monkeypatch.setattr(
+        data_sources,
+        "_query_datasets_with_compat",
+        lambda **kwargs: {"total": 1, "items": [row]},
+    )
+
+    result = await data_sources._handle_data_source_list_dataset_candidates(
+        {"auth_token": "token", "keyword": "orders", "page": 1, "page_size": 10}
+    )
+
+    assert result["success"] is True
+    assert result["candidates"], "应返回候选"
+    got = result["candidates"][0].get("preview_sample") or {}
+    assert got.get("rows") == [{"id": 7, "updated_at": "2026-06-11"}]
