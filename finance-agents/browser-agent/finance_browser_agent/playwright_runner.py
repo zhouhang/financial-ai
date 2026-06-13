@@ -53,11 +53,11 @@ except ImportError:  # pragma: no cover - Windows fallback
 _risk_waiting_cb: contextvars.ContextVar = contextvars.ContextVar("risk_waiting_cb", default=None)
 
 
-def _notify_risk_waiting() -> None:
+def _notify_risk_waiting(reason: str = "RISK_VERIFICATION") -> None:
     cb = _risk_waiting_cb.get()
     if cb:
         try:
-            cb("RISK_VERIFICATION")
+            cb(str(reason or "RISK_VERIFICATION"))
         except Exception:
             logger.exception("on_risk_waiting callback failed")
 
@@ -823,15 +823,31 @@ def _wait_for_risk_to_clear(
     timeout_ms: int,
     poll_interval_ms: int = 1000,
 ) -> bool:
+    return _wait_for_blocking_states_to_clear(
+        contexts,
+        timeout_ms=timeout_ms,
+        poll_interval_ms=poll_interval_ms,
+        blocking_states={"RISK_VERIFICATION"},
+    )
+
+
+def _wait_for_blocking_states_to_clear(
+    contexts: list[Any],
+    *,
+    timeout_ms: int,
+    poll_interval_ms: int = 1000,
+    blocking_states: set[str] | None = None,
+) -> bool:
+    blocking = set(blocking_states or {"RISK_VERIFICATION"})
     deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
     last_context = contexts[0] if contexts else None
     while time.monotonic() <= deadline:
-        if not any(_detect_auth_or_risk(context) == "RISK_VERIFICATION" for context in contexts):
+        if _blocking_states_cleared(contexts, blocking):
             return True
         remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
         wait_ms = min(max(1, poll_interval_ms), remaining_ms)
         _wait_for_timeout(last_context, wait_ms)
-    return not any(_detect_auth_or_risk(context) == "RISK_VERIFICATION" for context in contexts)
+    return _blocking_states_cleared(contexts, blocking)
 
 
 def _run_async_safely(coro: Any) -> None:
@@ -842,7 +858,11 @@ def _run_async_safely(coro: Any) -> None:
 
 
 def _risk_cleared(contexts: list[Any]) -> bool:
-    return not any(_detect_auth_or_risk(context) == "RISK_VERIFICATION" for context in contexts)
+    return _blocking_states_cleared(contexts, {"RISK_VERIFICATION"})
+
+
+def _blocking_states_cleared(contexts: list[Any], blocking_states: set[str]) -> bool:
+    return not any((_detect_auth_or_risk(context) or "") in blocking_states for context in contexts)
 
 
 def _wait_for_risk_to_clear_with_handoff(
@@ -855,12 +875,16 @@ def _wait_for_risk_to_clear_with_handoff(
     coordinator: RemoteControlCoordinator | None,
     backend_factory: Any = None,
     chrome: Any = None,
+    blocking_states: set[str] | None = None,
+    still_blocked_reason: str = "risk verification still blocked",
 ) -> bool:
+    blocking = set(blocking_states or {"RISK_VERIFICATION"})
     if coordinator is None:
-        return _wait_for_risk_to_clear(
+        return _wait_for_blocking_states_to_clear(
             contexts,
             timeout_ms=timeout_ms,
             poll_interval_ms=poll_interval_ms,
+            blocking_states=blocking,
         )
     if backend_factory is not None:
         backend = backend_factory.create_backend(page=page, chrome=chrome, risk_contexts=contexts)
@@ -890,7 +914,7 @@ def _wait_for_risk_to_clear_with_handoff(
                     backend=backend,
                     frame=backend.capture_frame(),
                 ))
-            if _risk_cleared(contexts):
+            if _blocking_states_cleared(contexts, blocking):
                 _run_async_safely(coordinator.emit_status({
                     "type": "handoff_completed",
                     "sync_job_id": sync_job_id,
@@ -898,18 +922,18 @@ def _wait_for_risk_to_clear_with_handoff(
                     "controller_id": backend.controller_id,
                 }))
                 return True
-            if backend.pop_resume_check_requested() and not _risk_cleared(contexts):
+            if backend.pop_resume_check_requested() and not _blocking_states_cleared(contexts, blocking):
                 _run_async_safely(coordinator.emit_status({
                     "type": "handoff_still_blocked",
                     "sync_job_id": sync_job_id,
                     "handoff_session_id": backend.handoff_session_id,
                     "controller_id": backend.controller_id,
-                    "reason": "risk verification still blocked",
+                    "reason": still_blocked_reason,
                 }))
             remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
             wait_ms = min(max(1, poll_interval_ms), remaining_ms)
             _wait_for_timeout(page, wait_ms)
-        return _risk_cleared(contexts)
+        return _blocking_states_cleared(contexts, blocking)
     finally:
         backend.stop_stream()
         coordinator.unregister_backend(sync_job_id=sync_job_id)
@@ -1391,6 +1415,7 @@ def _wait_for_post_login_selector(
     last_error: Exception | None = None
     last_detected: str | None = None
     risk_detected = False
+    auth_handoff_detected = False
     deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
     while time.monotonic() <= deadline:
         for context in contexts:
@@ -1422,6 +1447,28 @@ def _wait_for_post_login_selector(
                             backend_factory=backend_factory,
                             chrome=chrome,
                         )
+                elif detected == "AUTH_EXPIRED" and not auth_handoff_detected:
+                    auth_handoff_detected = True
+                    manual_timeout_ms = int(run_config.risk_manual_timeout_ms if run_config else 0)
+                    if manual_timeout_ms > 0:
+                        deadline = max(deadline, time.monotonic() + manual_timeout_ms / 1000)
+                        logger.warning(
+                            "browser auth expired waiting for manual completion: timeout_ms=%s",
+                            manual_timeout_ms,
+                        )
+                        _notify_risk_waiting("AUTH_EXPIRED")
+                        _wait_for_risk_to_clear_with_handoff(
+                            page,
+                            contexts,
+                            timeout_ms=manual_timeout_ms,
+                            poll_interval_ms=1000,
+                            sync_job_id=sync_job_id,
+                            coordinator=handoff_coordinator,
+                            backend_factory=backend_factory,
+                            chrome=chrome,
+                            blocking_states={"AUTH_EXPIRED", "RISK_VERIFICATION"},
+                            still_blocked_reason="auth expired or verification still blocked",
+                        )
         for context in contexts:
             remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
             try:
@@ -1431,6 +1478,8 @@ def _wait_for_post_login_selector(
                 last_error = exc
     if risk_detected:
         raise BrowserActionError("RISK_VERIFICATION", f"post-login risk verification not completed: {last_error}")
+    if auth_handoff_detected:
+        raise BrowserActionError("AUTH_EXPIRED", f"post-login auth expired not completed: {last_error}")
     if last_detected:
         raise BrowserActionError(last_detected, f"post-login detected {last_detected}: {last_error}")
     raise BrowserActionError("PAGE_CHANGED", f"post-login selector not found after login: {last_error}")

@@ -94,7 +94,7 @@ def test_create_without_sync_job_payload_has_empty_owner(monkeypatch):
     assert created["success"] is True and created["owner"] == {}
 
 
-def test_open_marks_controller_and_active(monkeypatch):
+def test_open_records_controller_but_waits_for_stream_before_active(monkeypatch):
     import uuid as _uuid
     import auth.db as _db
     from tools.data_sources import (
@@ -119,7 +119,7 @@ def test_open_marks_controller_and_active(monkeypatch):
     }))
 
     assert opened["success"] is True
-    assert opened["session"]["status"] == "active"
+    assert opened["session"]["status"] == "waiting_agent"
     assert opened["session"]["controller_id"] == "ctrl-1"
 
 

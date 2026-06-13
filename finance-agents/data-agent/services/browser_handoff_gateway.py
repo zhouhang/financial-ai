@@ -38,6 +38,7 @@ class HandoffController:
 _agents: dict[str, BrowserAgentPeer] = {}
 _controllers: dict[str, HandoffController] = {}
 _latest_frames: dict[str, dict[str, Any]] = {}
+_frame_confirmed_sessions: set[str] = set()
 _lock = asyncio.Lock()
 
 
@@ -45,6 +46,7 @@ def reset_for_tests() -> None:
     _agents.clear()
     _controllers.clear()
     _latest_frames.clear()
+    _frame_confirmed_sessions.clear()
 
 
 def _is_expired(session: dict[str, Any]) -> bool:
@@ -225,16 +227,6 @@ async def open_controller(*, token: str, send_json: SendJson) -> HandoffControll
         return controller
 
     await _send_handoff_start(agent, controller)
-    await call_mcp_tool(
-        "browser_handoff_session_event",
-        {
-            "worker_token": agent.token,
-            "handoff_session_id": handoff_session_id,
-            "agent_id": agent.agent_id,
-            "event_type": "stream_started",
-            "status": "active",
-        },
-    )
     return controller
 
 
@@ -349,8 +341,30 @@ async def route_agent_message(*, agent_id: str, token: str, msg: dict[str, Any])
             "height": int(msg.get("height") or 0),
             "data": str(msg.get("data") or ""),
         }
+        should_confirm_stream = False
         async with _lock:
             _latest_frames[handoff_session_id] = frame
+            if handoff_session_id not in _frame_confirmed_sessions:
+                _frame_confirmed_sessions.add(handoff_session_id)
+                should_confirm_stream = True
+        if should_confirm_stream:
+            await call_mcp_tool(
+                "browser_handoff_session_event",
+                {
+                    "worker_token": token,
+                    "handoff_session_id": handoff_session_id,
+                    "agent_id": agent_id,
+                    "event_type": "stream_started",
+                    "status": "active",
+                    "metadata": {
+                        "frame_width": frame["width"],
+                        "frame_height": frame["height"],
+                        "frame_mime": frame["mime"],
+                    },
+                },
+            )
+            if controller:
+                await controller.send_json({"type": "status", "status": "active"})
         if controller and controller.controller_id == str(msg.get("controller_id") or ""):
             await controller.send_json({"type": "frame", **frame})
         return True

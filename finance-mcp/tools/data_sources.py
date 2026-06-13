@@ -10806,10 +10806,9 @@ async def _handle_browser_handoff_session_control_open(arguments: dict[str, Any]
             "error": "handoff session 已结束",
             "session": _handoff_public_session(row, controller_id=controller_id),
         }
-    status = "active" if bool(arguments.get("agent_online", False)) else "waiting_agent"
     updated = auth_db.transition_handoff_session_status(
         handoff_session_id=str(row["id"]),
-        status=status,
+        status="waiting_agent",
         event_type="page_opened",
         controller_id=controller_id,
         agent_id=str(row.get("agent_id") or ""),

@@ -74,7 +74,6 @@ export function useHandoffSession(token: string) {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setStatus((current) => (current === 'connecting' ? 'active' : current));
       const cleanupEvents = buildReconnectCleanupEvents({
         gestureActive: gestureActiveRef.current,
         button: 'left',
