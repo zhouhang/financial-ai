@@ -85,6 +85,82 @@ async def test_controller_open_starts_online_agent_and_revokes_previous(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_controller_open_waits_for_first_frame_before_active(monkeypatch):
+    hg.reset_for_tests()
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call(tool: str, args: dict):
+        calls.append((tool, args))
+        if tool == "browser_handoff_session_describe":
+            return {
+                "success": True,
+                "session": {
+                    "handoff_session_id": "h1",
+                    "sync_job_id": "j1",
+                    "agent_id": "agent-A",
+                    "profile_key": "店铺A",
+                    "reason": "AUTH_EXPIRED",
+                    "status": "pending",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+            }
+        if tool == "browser_handoff_session_control_open":
+            return {
+                "success": True,
+                "session": {
+                    "handoff_session_id": "h1",
+                    "sync_job_id": "j1",
+                    "agent_id": "agent-A",
+                    "profile_key": "店铺A",
+                    "reason": "AUTH_EXPIRED",
+                    "status": "waiting_agent",
+                    "controller_id": args["controller_id"],
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+    agent = FakeAgent()
+    await hg.register_browser_agent(
+        agent_id="agent-A",
+        token="worker-token",
+        send_event=agent.send_event,
+    )
+    controller_socket = FakeController()
+
+    controller = await hg.open_controller(token="TKN", send_json=controller_socket.send_json)
+
+    assert agent.sent[-1]["event"] == "handoff_start"
+    assert not any(
+        tool == "browser_handoff_session_event" and args.get("event_type") == "stream_started"
+        for tool, args in calls
+    )
+    assert not any(msg.get("status") == "active" for msg in controller_socket.sent)
+
+    await hg.route_agent_message(
+        agent_id="agent-A",
+        token="worker-token",
+        msg={
+            "type": "handoff_frame",
+            "handoff_session_id": "h1",
+            "controller_id": controller.controller_id,
+            "frame_id": 1,
+            "mime": "image/jpeg",
+            "width": 100,
+            "height": 80,
+            "data": "abc",
+        },
+    )
+
+    assert any(
+        tool == "browser_handoff_session_event" and args.get("event_type") == "stream_started"
+        for tool, args in calls
+    )
+    assert any(msg.get("type") == "status" and msg.get("status") == "active" for msg in controller_socket.sent)
+
+
+@pytest.mark.asyncio
 async def test_controller_open_waits_when_agent_offline(monkeypatch):
     hg.reset_for_tests()
 
@@ -126,6 +202,13 @@ async def test_controller_open_waits_when_agent_offline(monkeypatch):
 @pytest.mark.asyncio
 async def test_frame_routes_only_to_current_controller(monkeypatch):
     hg.reset_for_tests()
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call(tool: str, payload: dict):
+        calls.append((tool, payload))
+        return {"success": True}
+
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
     controller = FakeController()
     hg._controllers["h1"] = hg.HandoffController(
         handoff_session_id="h1",
@@ -150,7 +233,7 @@ async def test_frame_routes_only_to_current_controller(monkeypatch):
         },
     )
 
-    assert controller.sent == [{
+    assert controller.sent[-1] == {
         "type": "frame",
         "handoff_session_id": "h1",
         "frame_id": 1,
@@ -158,7 +241,23 @@ async def test_frame_routes_only_to_current_controller(monkeypatch):
         "width": 100,
         "height": 80,
         "data": "abc",
-    }]
+    }
+    assert any(msg.get("type") == "status" and msg.get("status") == "active" for msg in controller.sent)
+    assert calls == [(
+        "browser_handoff_session_event",
+        {
+            "worker_token": "worker-token",
+            "handoff_session_id": "h1",
+            "agent_id": "agent-A",
+            "event_type": "stream_started",
+            "status": "active",
+            "metadata": {
+                "frame_width": 100,
+                "frame_height": 80,
+                "frame_mime": "image/jpeg",
+            },
+        },
+    )]
 
 
 @pytest.mark.asyncio

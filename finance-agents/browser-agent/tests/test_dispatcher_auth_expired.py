@@ -101,6 +101,47 @@ async def test_auth_expired_triggers_notification():
     client.mark_browser_job_failed.assert_called_once()
 
 
+async def test_auth_expired_not_renotified_after_live_handoff_callback():
+    risk_calls: list[dict] = []
+
+    async def fake_report_risk_waiting(
+        *, sync_job_id: str, reason: str, company_id: str = "",
+        shop_id: str = "", data_source_id: str = "",
+    ) -> dict:
+        risk_calls.append({
+            "sync_job_id": sync_job_id,
+            "reason": reason,
+            "company_id": company_id,
+            "shop_id": shop_id,
+        })
+        return {"success": True}
+
+    client = AsyncMock()
+    client.claim_browser_job = AsyncMock(return_value={"job": _make_job()})
+    client.mark_browser_job_failed = AsyncMock(return_value={"success": True})
+    client.mark_browser_job_success = AsyncMock(return_value={"success": True})
+    client.report_risk_waiting = fake_report_risk_waiting
+    client.handoff_coordinator = None
+    client.handoff_backend_factory = None
+
+    def runner(message: dict[str, Any]) -> dict[str, Any]:
+        message["on_risk_waiting"]("AUTH_EXPIRED")
+        return {
+            "status": "failed",
+            "fail_reason": "AUTH_EXPIRED",
+            "error_info": {"message": "manual handoff timed out"},
+        }
+
+    loop = BrowserDispatcherLoop(client=client, runner=runner, max_concurrency=1)
+
+    outcome = await loop.run_once()
+
+    assert outcome["status"] == "failed"
+    assert len(risk_calls) == 1
+    assert risk_calls[0]["reason"] == "AUTH_EXPIRED"
+    client.mark_browser_job_failed.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # Test 2: Second AUTH_EXPIRED for same shop same day → deduped (no second call)
 # ---------------------------------------------------------------------------

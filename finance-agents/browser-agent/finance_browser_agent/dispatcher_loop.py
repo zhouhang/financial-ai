@@ -92,6 +92,8 @@ class BrowserDispatcherLoop:
 
                 def _on_risk_waiting(reason: str = "RISK_VERIFICATION") -> None:
                     try:
+                        if str(reason or "") == "AUTH_EXPIRED":
+                            _AUTH_EXPIRED_NOTIFIED[str(job.get("shop_id") or "")] = date.today()
                         asyncio.run_coroutine_threadsafe(
                             self.client.report_risk_waiting(
                                 sync_job_id=str(job.get("id") or ""),
