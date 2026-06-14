@@ -6896,6 +6896,7 @@ def upsert_shop_runtime_binding(
     credential_ref: str,
     profile_status: str = "active",
     playbook_status: str = "ok",
+    runtime_profile_ref: str = "",
 ) -> dict | None:
     conn_manager = get_conn()
     try:
@@ -6905,10 +6906,12 @@ def upsert_shop_runtime_binding(
                     """
                     INSERT INTO shop_runtime_bindings (
                         company_id, data_source_id, shop_id, playbook_id, agent_id,
-                        egress_group, credential_ref, profile_status, playbook_status, cron_pause_reason
+                        egress_group, credential_ref, profile_status, playbook_status, cron_pause_reason,
+                        runtime_profile_ref
                     ) VALUES (
                         %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, NULL
+                        %s, %s, %s, %s, NULL,
+                        %s
                     )
                     ON CONFLICT (company_id, data_source_id)
                     DO UPDATE SET
@@ -6921,6 +6924,9 @@ def upsert_shop_runtime_binding(
                         playbook_status = EXCLUDED.playbook_status,
                         cron_pause_reason = NULL,
                         updated_at = CURRENT_TIMESTAMP
+                    -- runtime_profile_ref intentionally NOT in DO UPDATE: it is set once at
+                    -- binding creation. Existing bindings (incl. legacy hand-aligned ones)
+                    -- keep their value untouched on re-registration. See _browser_login_profile_ref.
                     RETURNING *
                     """,
                     (
@@ -6933,6 +6939,7 @@ def upsert_shop_runtime_binding(
                         credential_ref,
                         profile_status,
                         playbook_status,
+                        runtime_profile_ref,
                     ),
                 )
                 row = cur.fetchone()

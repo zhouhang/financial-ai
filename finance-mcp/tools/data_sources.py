@@ -23,6 +23,7 @@ from decimal import Decimal
 from math import isfinite
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import psycopg2.extras
 import pandas as pd
@@ -2423,6 +2424,46 @@ def _browser_registration_slug(title: Any) -> str:
             previous_dash = True
     slug = "".join(slug_chars).strip("-")
     return slug or "browser-collection"
+
+
+def _browser_login_profile_ref(*, playbook_body: dict[str, Any], username: str) -> str:
+    """Derive a stable per-login profile ref = (login host + username).
+
+    Browser collection shares one persistent Chrome profile per *login identity* (same
+    account on the same site). A shop's multiple datasets (e.g. orders + bills) that
+    authenticate with the same username therefore reuse one session instead of each
+    logging in separately. Keyed on:
+      - the login *host* (netloc of the first step URL) — NOT the full data-page URL,
+        which differs per dataset (orders vs bills) and would split the shared profile;
+      - the *username* — NOT the full credential_ref, which is enc(username+password) and
+        rotates when the password changes (rotation would orphan the profile -> relogin).
+    Returns "" when either part is missing; the caller then leaves runtime_profile_ref
+    blank and the runner falls back to shop_id (legacy per-dataset profile), so existing
+    behaviour is preserved.
+    """
+    user = str(username or "").strip()
+    if not user:
+        return ""
+    steps = playbook_body.get("steps") or playbook_body.get("actions") or []
+    host = ""
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        url = str(
+            step.get("url")
+            or step.get("target_url")
+            or (step.get("params") or {}).get("url")
+            or ""
+        ).strip()
+        if url:
+            parsed_host = urlparse(url).netloc.lower()
+            if parsed_host:
+                host = parsed_host
+                break
+    if not host:
+        return ""
+    digest = hashlib.sha1(f"{host}|{user}".encode("utf-8")).hexdigest()[:16]
+    return f"login::{host}::{digest}"
 
 
 def _browser_registration_code(*, title: str) -> str:
@@ -8258,6 +8299,12 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
         emergency_page_changed=bool(arguments.get("emergency_page_changed", False)),
         bypass_canary_reason=str(arguments.get("bypass_canary_reason") or ""),
     )
+    # Share one persistent Chrome profile per login identity (site + username), so a shop's
+    # orders + bills datasets reuse one session. Set only on this (creation) path; existing
+    # bindings keep their runtime_profile_ref untouched (see upsert_shop_runtime_binding).
+    runtime_profile_ref = _browser_login_profile_ref(
+        playbook_body=playbook_body, username=credential_username
+    )
     binding_row = auth_db.upsert_shop_runtime_binding(
         company_id=company_id,
         data_source_id=source_id,
@@ -8268,6 +8315,7 @@ async def _handle_data_source_register_browser_playbook(arguments: dict[str, Any
         credential_ref=credential_ref,
         profile_status="verifying",
         playbook_status="ok",
+        runtime_profile_ref=runtime_profile_ref,
     )
 
     resource_key = f"{playbook_id}@{version}"
