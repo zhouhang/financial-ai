@@ -9,14 +9,17 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from finance_browser_agent.data_agent_ws import DataAgentWsClient
 from finance_browser_agent import dispatcher_loop as dl_module
 from finance_browser_agent.dispatcher_loop import BrowserDispatcherLoop
+from finance_browser_agent.tally_client import BrowserAgentConfig, BrowserAgentTallyClient
 
 
 def _make_job(
@@ -271,3 +274,113 @@ async def test_auth_expired_different_shops_each_notified():
     assert "shop-A" in notified_shops
     assert "shop-B" in notified_shops
     assert len(risk_calls) == 2
+
+
+class _FakeWs:
+    def __init__(self, *, disconnect_first_request: bool = False) -> None:
+        self.disconnect_first_request = disconnect_first_request
+        self.sent: list[dict[str, Any]] = []
+        self._queue: asyncio.Queue[Any] = asyncio.Queue()
+
+    async def send(self, raw: str) -> None:
+        msg = json.loads(raw)
+        self.sent.append(msg)
+        msg_type = str(msg.get("type") or "")
+        if msg_type == "hello":
+            return
+        if self.disconnect_first_request:
+            await self._queue.put(ConnectionError("data-agent WS 已断开"))
+            return
+        await self._queue.put(
+            json.dumps(
+                {
+                    "type": "result",
+                    "id": msg.get("id"),
+                    "ok": True,
+                    "data": {"success": True, "sync_job_id": msg.get("sync_job_id")},
+                }
+            )
+        )
+
+    async def recv(self) -> str:
+        return json.dumps({"type": "hello_ack", "ok": True})
+
+    def __aiter__(self) -> "_FakeWs":
+        return self
+
+    async def __anext__(self) -> str:
+        item = await self._queue.get()
+        if isinstance(item, BaseException):
+            raise item
+        return str(item)
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_ws_request_retries_idempotent_completion_after_disconnect() -> None:
+    sockets = [_FakeWs(disconnect_first_request=True), _FakeWs()]
+    created_sockets: list[_FakeWs] = []
+
+    async def connector(_url: str) -> _FakeWs:
+        socket = sockets.pop(0)
+        created_sockets.append(socket)
+        return socket
+
+    client = DataAgentWsClient(
+        ws_url="ws://data-agent/browser-agent",
+        agent_id="agent-1",
+        max_concurrency=1,
+        token_provider=lambda: "token",
+        connector=connector,
+    )
+
+    result = await client.request(
+        "job_complete",
+        {"sync_job_id": "sync-001"},
+        retry_on_disconnect=True,
+    )
+
+    assert result == {"success": True, "sync_job_id": "sync-001"}
+    assert [msg["type"] for msg in created_sockets[0].sent] == ["hello", "job_complete"]
+    assert [msg["type"] for msg in created_sockets[1].sent] == ["hello", "job_complete"]
+
+
+async def test_tally_client_marks_terminal_updates_as_disconnect_retryable() -> None:
+    class FakeWsClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any], bool]] = []
+
+        async def request(
+            self,
+            msg_type: str,
+            payload: dict[str, Any],
+            *,
+            retry_on_disconnect: bool = False,
+        ) -> dict[str, Any]:
+            self.calls.append((msg_type, payload, retry_on_disconnect))
+            return {"success": True}
+
+        async def send_event(self, payload: dict[str, Any]) -> dict[str, Any]:
+            return {"success": True}
+
+    fake_ws = FakeWsClient()
+    client = BrowserAgentTallyClient(
+        config=BrowserAgentConfig(
+            agent_id="agent-1",
+            company_id="company-1",
+            data_agent_ws_url="ws://data-agent/browser-agent",
+            poll_interval_seconds=1,
+            max_concurrency=1,
+            heartbeat_interval_seconds=30,
+        ),
+        ws_client=fake_ws,
+    )
+
+    await client.mark_browser_job_success({"sync_job_id": "sync-success"})
+    await client.mark_browser_job_failed({"sync_job_id": "sync-fail"})
+
+    assert fake_ws.calls == [
+        ("job_complete", {"sync_job_id": "sync-success"}, True),
+        ("job_fail", {"sync_job_id": "sync-fail"}, True),
+    ]

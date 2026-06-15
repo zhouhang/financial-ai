@@ -1518,6 +1518,80 @@ def test_browser_sync_job_claim_returns_job(monkeypatch) -> None:
     assert result["job"] == expected_job
 
 
+def test_browser_sync_job_claim_auto_completes_when_records_already_exist(monkeypatch) -> None:
+    import asyncio
+
+    data_sources = _import_mcp_data_sources()
+
+    claimed_job = {
+        "id": "sync-001",
+        "company_id": "company-001",
+        "data_source_id": "source-001",
+        "resource_key": "playbook-1@1",
+        "job_status": "running",
+        "is_verification": False,
+        "request_payload": {
+            "dataset_id": "dataset-001",
+            "biz_date": "2026-05-25",
+        },
+    }
+    completed_jobs: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "claim_next_browser_sync_job",
+        lambda *, agent_id, agent_max_concurrency: claimed_job,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_browser_collection_records",
+        lambda **_kwargs: [{"id": "record-1", "latest_seen_job_id": "verified-job-1"}],
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "job_status": "success",
+            "request_payload": {"dataset_id": "dataset-001", "biz_date": "2026-05-25"},
+        },
+    )
+
+    def fake_mark_success(**kwargs: Any) -> dict[str, Any]:
+        completed_jobs.append(kwargs)
+        return {"id": kwargs["sync_job_id"], "job_status": "success"}
+
+    monkeypatch.setattr(data_sources.auth_db, "mark_browser_sync_job_success", fake_mark_success)
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_claim",
+            {"worker_token": "tok", "agent_id": "agent-001", "max_concurrency": 2},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["job"] is None
+    assert result["auto_completed"] is True
+    assert result["completed_job"]["id"] == "sync-001"
+    assert completed_jobs == [
+        {
+            "sync_job_id": "sync-001",
+            "summary": {
+                "skipped": True,
+                "reuse_reason": "browser_records_exist",
+                "reused_sync_job_id": "verified-job-1",
+            },
+            "allowed_current_statuses": tuple(data_sources.BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
+        }
+    ]
+
+
 def test_browser_agent_heartbeat_tool_calls_helper(monkeypatch) -> None:
     import asyncio
 

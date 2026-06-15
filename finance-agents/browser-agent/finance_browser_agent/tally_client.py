@@ -175,10 +175,10 @@ class BrowserAgentTallyClient:
         })
 
     async def mark_browser_job_success(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._client.request("job_complete", dict(payload))
+        return await self._client.request("job_complete", dict(payload), retry_on_disconnect=True)
 
     async def mark_browser_job_failed(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._client.request("job_fail", dict(payload))
+        return await self._client.request("job_fail", dict(payload), retry_on_disconnect=True)
 
     async def report_risk_waiting(self, **kwargs):
         return await self._client.report_risk_waiting(**kwargs)
