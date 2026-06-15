@@ -9,6 +9,7 @@ VALID_ACTIONS = {
     "navigate",
     "click",
     "fill",
+    "ensure_page_ready",
     "set_date",
     "set_range_calendar_day",
     "wait_for",

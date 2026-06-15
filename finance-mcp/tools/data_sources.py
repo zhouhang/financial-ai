@@ -121,6 +121,7 @@ VALID_BROWSER_PLAYBOOK_ACTIONS = {
     "navigate",
     "click",
     "fill",
+    "ensure_page_ready",
     "set_date",
     "set_range_calendar_day",
     "wait_for",
@@ -230,6 +231,33 @@ def _find_reusable_browser_success_job(
         biz_date=biz_date,
     )
     if not job:
+        records = auth_db.list_browser_collection_records(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            dataset_id=dataset_id,
+            resource_key=resource_key,
+            biz_date=biz_date,
+            limit=5,
+        )
+        seen_job_ids: set[str] = set()
+        for record in records:
+            for key in ("latest_seen_job_id", "first_seen_job_id"):
+                sync_job_id = _safe_text((record or {}).get(key))
+                if not sync_job_id or sync_job_id in seen_job_ids:
+                    continue
+                seen_job_ids.add(sync_job_id)
+                record_job = auth_db.get_unified_sync_job_by_id(sync_job_id) or {}
+                if _safe_text(record_job.get("job_status")).lower() != "success":
+                    continue
+                payload = record_job.get("request_payload") if isinstance(record_job, dict) else {}
+                payload = payload if isinstance(payload, dict) else {}
+                payload_dataset_id = _safe_text(payload.get("dataset_id"))
+                payload_biz_date = _safe_text(payload.get("biz_date"))
+                if payload_dataset_id and payload_dataset_id != dataset_id:
+                    continue
+                if payload_biz_date and payload_biz_date != biz_date:
+                    continue
+                return record_job
         return None
     return job
 
