@@ -330,6 +330,7 @@ async def test_browser_trigger_reuses_success_same_biz_date_when_records_exist(
         "_load_runtime_source",
         lambda _row, include_secret=False: {"source_kind": "browser_playbook"},
     )
+    monkeypatch.setattr(data_sources.auth_db, "find_inflight_dataset_collection_sync_job", lambda **_kwargs: None)
     monkeypatch.setattr(
         data_sources.auth_db,
         "find_success_dataset_collection_sync_job",
@@ -403,6 +404,7 @@ async def test_browser_trigger_reuses_success_same_biz_date_when_records_are_emp
         "_load_runtime_source",
         lambda _row, include_secret=False: {"source_kind": "browser_playbook"},
     )
+    monkeypatch.setattr(data_sources.auth_db, "find_inflight_dataset_collection_sync_job", lambda **_kwargs: None)
     monkeypatch.setattr(
         data_sources.auth_db,
         "find_success_dataset_collection_sync_job",
@@ -472,6 +474,7 @@ async def test_browser_trigger_leaves_new_job_pending_for_agent_claim(
         "_load_runtime_source",
         lambda _row, include_secret=False: {"source_kind": "browser_playbook"},
     )
+    monkeypatch.setattr(data_sources.auth_db, "find_inflight_dataset_collection_sync_job", lambda **_kwargs: None)
     monkeypatch.setattr(data_sources.auth_db, "find_success_dataset_collection_sync_job", lambda **_kwargs: None)
 
     def fake_create_or_reuse_dataset_collection_sync_job(**kwargs):

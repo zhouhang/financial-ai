@@ -142,6 +142,28 @@ async def test_auth_expired_not_renotified_after_live_handoff_callback():
     client.mark_browser_job_failed.assert_called_once()
 
 
+async def test_dispatcher_passes_event_loop_to_runner_message():
+    seen_loop: asyncio.AbstractEventLoop | None = None
+
+    client = AsyncMock()
+    client.claim_browser_job = AsyncMock(return_value={"job": _make_job()})
+    client.mark_browser_job_success = AsyncMock(return_value={"success": True})
+    client.handoff_coordinator = None
+    client.handoff_backend_factory = None
+
+    def runner(message: dict[str, Any]) -> dict[str, Any]:
+        nonlocal seen_loop
+        seen_loop = message.get("handoff_event_loop")
+        return {"status": "success", "records": [], "capture_files": []}
+
+    loop = BrowserDispatcherLoop(client=client, runner=runner, max_concurrency=1)
+
+    outcome = await loop.run_once()
+
+    assert outcome["status"] == "success"
+    assert seen_loop is asyncio.get_running_loop()
+
+
 # ---------------------------------------------------------------------------
 # Test 2: Second AUTH_EXPIRED for same shop same day → deduped (no second call)
 # ---------------------------------------------------------------------------

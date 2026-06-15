@@ -26,6 +26,7 @@ from tools.mcp_client import (
     data_source_get_dataset,
     data_source_get_sync_job,
     data_source_list_collection_records,
+    data_source_retry_browser_playbook_verification,
     data_source_trigger_dataset_collection,
     execution_run_exception_get,
     execution_run_exception_update,
@@ -1086,6 +1087,16 @@ def _is_browser_collection_waiting_result(result: dict[str, Any], binding: dict[
     return bool(result.get("queued")) or _sync_job_status(job) in _COLLECTION_WAITING_STATUSES
 
 
+def _is_browser_binding_unavailable_result(result: dict[str, Any], binding: dict[str, Any]) -> bool:
+    driver = str(result.get("collection_driver") or binding.get("collection_driver") or "").strip()
+    if driver != _BROWSER_COLLECTION_DRIVER:
+        return False
+    return (
+        not bool(result.get("success"))
+        and str(result.get("failure_type") or "").strip() == "browser_binding_unavailable"
+    )
+
+
 def _waiting_dataset_from_binding(binding: dict[str, Any], *, biz_date: str) -> dict[str, Any]:
     return {
         "data_source_id": _get_binding_source_id(binding),
@@ -1404,6 +1415,41 @@ async def _trigger_and_wait_collection(
         "job": _safe_dict(wait_result.get("job")) or job,
         "error": str(wait_result.get("error") or "采集任务执行失败"),
         "queued": bool(collect_result.get("queued")),
+    }
+
+
+async def _queue_browser_verification_for_binding(
+    *,
+    auth_token: str,
+    source_id: str,
+    dataset_id: str,
+    biz_date: str,
+) -> dict[str, Any]:
+    result = await data_source_retry_browser_playbook_verification(
+        auth_token,
+        source_id,
+        verification_biz_date=biz_date,
+        dataset_id=dataset_id,
+        force_collection=True,
+    )
+    if not bool(result.get("success")):
+        return result
+    sync_job_id = str(result.get("verification_sync_job_id") or "").strip()
+    job: dict[str, Any] = {}
+    if sync_job_id:
+        job = {
+            "id": sync_job_id,
+            "sync_job_id": sync_job_id,
+            "status": str(result.get("status") or "verification_pending"),
+            "job_status": str(result.get("status") or "verification_pending"),
+            "is_verification": True,
+        }
+    return {
+        **result,
+        "collection_driver": _BROWSER_COLLECTION_DRIVER,
+        "queued": True,
+        "job": job,
+        "message": str(result.get("message") or "浏览器验证任务已下发，等待完成后继续对账"),
     }
 
 
@@ -2039,6 +2085,45 @@ async def check_dataset_ready_node(state: AgentState) -> dict[str, Any]:
                     }
                 )
                 continue
+            if _is_browser_binding_unavailable_result(collect_result, binding):
+                verification_result = await _queue_browser_verification_for_binding(
+                    auth_token=auth_token,
+                    source_id=source_id,
+                    dataset_id=str(binding.get("dataset_id") or "").strip(),
+                    biz_date=biz_date,
+                )
+                verification_success = bool(verification_result.get("success"))
+                verification_job_id = _sync_job_id(verification_result.get("job"))
+                collection_attempts.append(
+                    {
+                        "binding": binding,
+                        "success": verification_success,
+                        "job": _safe_dict(verification_result.get("job")),
+                        "job_id": verification_job_id,
+                        "error": "" if verification_success else str(
+                            verification_result.get("error")
+                            or verification_result.get("detail")
+                            or "浏览器验证任务下发失败"
+                        ),
+                        "collection_driver": collection_driver,
+                        "dataset_source_type": str(binding.get("dataset_source_type") or ""),
+                        "queued": bool(verification_result.get("queued")),
+                        "verification": True,
+                    }
+                )
+                if verification_success and verification_job_id:
+                    missing_bindings.append(
+                        {
+                            **binding,
+                            "collection_driver": collection_driver,
+                            "dataset_source_type": str(binding.get("dataset_source_type") or ""),
+                            "error": "浏览器验证任务已创建，等待完成后继续对账",
+                            "waiting_data": True,
+                            "collection_job_id": verification_job_id,
+                            "verification_job_id": verification_job_id,
+                        }
+                    )
+                    continue
             if not collection_success:
                 missing_bindings.append(
                     {

@@ -2010,6 +2010,130 @@ def test_browser_sync_job_complete_writes_records_and_files(monkeypatch) -> None
     ]
 
 
+def test_browser_sync_job_complete_auto_activates_verification_playbook(monkeypatch) -> None:
+    import asyncio
+    from contextlib import nullcontext
+
+    data_sources = _import_mcp_data_sources()
+    activated: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "company_id": "c1",
+            "data_source_id": "source-browser",
+            "resource_key": "browser-orders@1",
+            "job_status": "running",
+            "is_verification": True,
+            "request_payload": {
+                "dataset_id": "dataset-browser",
+                "dataset_code": "browser-orders",
+                "biz_date": "2026-06-15",
+                "playbook_id": "browser-orders",
+                "playbook_version": "1",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "browser_sync_job_transition_lock",
+        lambda sync_job_id: nullcontext(),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "guard_browser_sync_job_worker_active",
+        lambda **kw: {
+            "id": kw["sync_job_id"],
+            "company_id": "c1",
+            "data_source_id": "source-browser",
+            "resource_key": "browser-orders@1",
+            "job_status": "running",
+            "is_verification": True,
+            "request_payload": {
+                "dataset_id": "dataset-browser",
+                "dataset_code": "browser-orders",
+                "biz_date": "2026-06-15",
+                "playbook_id": "browser-orders",
+                "playbook_version": "1",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda *, company_id, data_source_id: {
+            "shop_id": "shop-browser",
+            "playbook_id": "browser-orders",
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "upsert_browser_collection_records",
+        lambda **kw: {"inserted_count": 1, "updated_count": 0, "unchanged_count": 0, "input_count": 1},
+    )
+    monkeypatch.setattr(data_sources.auth_db, "insert_browser_capture_files", lambda **kw: {})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_data_source_dataset_health",
+        lambda **kw: {"id": kw["dataset_id"]},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "mark_browser_sync_job_success",
+        lambda **kw: {
+            "id": kw["sync_job_id"],
+            "job_status": "success",
+            "completed_at": "2026-06-15T10:00:00+08:00",
+            "is_verification": True,
+            "request_payload": {
+                "dataset_id": "dataset-browser",
+                "dataset_code": "browser-orders",
+                "biz_date": "2026-06-15",
+                "playbook_id": "browser-orders",
+                "playbook_version": "1",
+            },
+        },
+    )
+    monkeypatch.setattr(data_sources.auth_db, "cancel_open_handoff_sessions_for_sync_job", lambda **kw: 0)
+
+    def fake_activate(**kwargs):
+        activated.update(kwargs)
+        return {
+            "playbook": {"id": "playbook-1", "status": "active"},
+            "binding": {"id": "binding-1", "profile_status": "active", "playbook_status": "ok"},
+        }
+
+    monkeypatch.setattr(data_sources.auth_db, "activate_browser_playbook_and_binding", fake_activate)
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_complete",
+            {
+                "worker_token": "tok",
+                "sync_job_id": "verification-sync-001",
+                "summary": {"quality_summary": {"row_count": 1}},
+                "records": [{"item_key": "B1", "payload": {"bill_no": "B1"}}],
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert result["auto_finalize"]["success"] is True
+    assert activated == {
+        "company_id": "c1",
+        "playbook_id": "browser-orders",
+        "version": "1",
+        "data_source_id": "source-browser",
+    }
+
+
 def test_dispatcher_persists_capture_files() -> None:
     fake_db = FakeDb()
     manager = FakeAgentConnectionManager()

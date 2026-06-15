@@ -163,6 +163,18 @@ def test_clear_related_handoff_sessions_marks_non_final_sessions_cancelled(monke
     assert "sync_job_id = %s" in sql
 
 
+def test_clear_related_handoff_sessions_is_best_effort_when_db_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(auth_db, "get_conn", lambda: (_ for _ in ()).throw(RuntimeError("db down")))
+
+    count = auth_db.cancel_open_handoff_sessions_for_sync_job(
+        sync_job_id="sync-001",
+        reason="browser job failed",
+        event_type="job_failed",
+    )
+
+    assert count == 0
+
+
 def test_get_browser_sync_job_with_source_filters_company_and_source_kind(monkeypatch) -> None:
     cursor = FakeCursor(
         rows=[
@@ -315,6 +327,7 @@ def test_data_source_clear_browser_sync_job_rejects_terminal_job(monkeypatch) ->
 
 def test_browser_worker_complete_does_not_overwrite_cancelled_job(monkeypatch) -> None:
     monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(auth_db, "browser_sync_job_transition_lock", lambda sync_job_id: nullcontext())
     monkeypatch.setattr(
         auth_db,
         "get_unified_sync_job_by_id",
@@ -580,8 +593,106 @@ def test_browser_worker_fail_does_not_overwrite_cancelled_job(monkeypatch) -> No
     assert fail_calls == []
 
 
+def test_browser_worker_fail_closes_open_handoff_sessions(monkeypatch) -> None:
+    monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(
+        auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": "waiting_human_verification",
+        },
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "mark_browser_sync_job_failed",
+        lambda **kwargs: {"id": kwargs["sync_job_id"], "job_status": "failed"},
+    )
+    cancel_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        auth_db,
+        "cancel_open_handoff_sessions_for_sync_job",
+        lambda **kwargs: cancel_calls.append(kwargs) or 1,
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_fail",
+            {
+                "worker_token": "worker",
+                "sync_job_id": "sync-001",
+                "fail_reason": "AUTH_EXPIRED",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert cancel_calls == [
+        {
+            "sync_job_id": "sync-001",
+            "reason": "browser job failed: AUTH_EXPIRED",
+            "event_type": "job_failed",
+        }
+    ]
+
+
+def test_browser_worker_complete_closes_open_handoff_sessions(monkeypatch) -> None:
+    monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(auth_db, "browser_sync_job_transition_lock", lambda sync_job_id: nullcontext())
+    monkeypatch.setattr(
+        auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": "resuming",
+            "request_payload": {"params": {}},
+        },
+    )
+    monkeypatch.setattr(
+        auth_db,
+        "guard_browser_sync_job_worker_active",
+        lambda **kwargs: {
+            "id": kwargs["sync_job_id"],
+            "company_id": "company-001",
+            "data_source_id": "source-001",
+            "job_status": "resuming",
+            "request_payload": {"params": {}},
+        },
+    )
+    monkeypatch.setattr(auth_db, "get_shop_runtime_binding_for_source", lambda **kwargs: {})
+    monkeypatch.setattr(auth_db, "mark_browser_sync_job_success", lambda **kwargs: {"id": kwargs["sync_job_id"], "completed_at": "2026-06-15"})
+    monkeypatch.setattr(auth_db, "update_unified_data_source_dataset_health", lambda **kwargs: None)
+    cancel_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        auth_db,
+        "cancel_open_handoff_sessions_for_sync_job",
+        lambda **kwargs: cancel_calls.append(kwargs) or 1,
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_complete",
+            {"worker_token": "worker", "sync_job_id": "sync-001", "summary": {}},
+        )
+    )
+
+    assert result["success"] is True
+    assert cancel_calls == [
+        {
+            "sync_job_id": "sync-001",
+            "reason": "browser job completed",
+            "event_type": "job_completed",
+        }
+    ]
+
+
 def test_browser_handoff_create_does_not_overwrite_cancelled_job(monkeypatch) -> None:
     monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(auth_db, "browser_sync_job_transition_lock", lambda sync_job_id: nullcontext())
     monkeypatch.setattr(
         auth_db,
         "get_sync_job",
@@ -627,6 +738,7 @@ def test_browser_handoff_create_does_not_overwrite_cancelled_job(monkeypatch) ->
 
 def test_browser_handoff_create_uses_guarded_sync_status_transition(monkeypatch) -> None:
     monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(auth_db, "browser_sync_job_transition_lock", lambda sync_job_id: nullcontext())
     monkeypatch.setattr(
         auth_db,
         "get_sync_job",
@@ -673,6 +785,11 @@ def test_browser_handoff_create_uses_guarded_sync_status_transition(monkeypatch)
 
 
 def test_browser_handoff_resume_uses_guarded_sync_status_transition(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auth_db,
+        "get_sync_job",
+        lambda sync_job_id: {"id": sync_job_id, "job_status": "waiting_human_verification"},
+    )
     monkeypatch.setattr(
         data_sources,
         "_handoff_row_for_token",

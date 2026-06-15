@@ -10,6 +10,7 @@ VALID_ACTIONS = {
     "click",
     "fill",
     "set_date",
+    "set_range_calendar_day",
     "wait_for",
     "wait_ms",
     "extract_text",
@@ -20,6 +21,7 @@ VALID_ACTIONS = {
     "download_history_file",
     "download_qianniu_export_report",
     "parse_table",
+    "paginate_capture_json",
     "assert",
 }
 

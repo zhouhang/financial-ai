@@ -107,7 +107,7 @@ class BrowserDispatcherLoop:
                     except Exception:
                         logger.exception("report_risk_waiting schedule failed")
 
-                message = self._message_from_job(job, payload)
+                message = self._message_from_job(job, payload, handoff_event_loop=loop)
                 message["on_risk_waiting"] = _on_risk_waiting
                 result = await asyncio.to_thread(self.runner, message)
         if isinstance(result, dict) and result.get("status") == "success":
@@ -238,7 +238,13 @@ class BrowserDispatcherLoop:
                 logger.exception("browser dispatcher worker failed: worker_index=%s", worker_index)
                 await asyncio.sleep(5)
 
-    def _message_from_job(self, job: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    def _message_from_job(
+        self,
+        job: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        handoff_event_loop: asyncio.AbstractEventLoop | None = None,
+    ) -> dict[str, Any]:
         params = dict(payload.get("params") or payload)
         credential_ref = str(job.get("credential_ref") or "")
         params = inject_credentials_into_params(params, credential_ref)
@@ -256,4 +262,5 @@ class BrowserDispatcherLoop:
             "timeout_ms": int(params.get("timeout_ms") or payload.get("timeout_ms") or 900000),
             "handoff_coordinator": getattr(self.client, "handoff_coordinator", None),
             "handoff_backend_factory": getattr(self.client, "handoff_backend_factory", None),
+            "handoff_event_loop": handoff_event_loop,
         }

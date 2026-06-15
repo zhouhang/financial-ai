@@ -25,13 +25,15 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import contextlib
+import json
 import logging
 import os
 import random
 import re
 import time
+import zipfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -387,6 +389,7 @@ def _execute_action(
     storage_context: dict[str, str] | None = None,
     handoff_coordinator: RemoteControlCoordinator | None = None,
     backend_factory: Any = None,
+    handoff_event_loop: Any = None,
     chrome: Any = None,
     overlays: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -419,6 +422,7 @@ def _execute_action(
                 sync_job_id=sync_job_id,
                 handoff_coordinator=handoff_coordinator,
                 backend_factory=backend_factory,
+                handoff_event_loop=handoff_event_loop,
                 chrome=chrome,
             )
         if detected:
@@ -448,6 +452,15 @@ def _execute_action(
             overlays=overlays,
         )
         return {}
+    if name == "set_range_calendar_day":
+        _set_range_calendar_day(
+            page,
+            action,
+            value=_resolve_value(action, params, extracted),
+            timeout_ms=timeout_ms,
+            overlays=overlays,
+        )
+        return {}
     if name == "wait_for":
         page.wait_for_selector(selector, timeout=timeout_ms)
         return {}
@@ -468,6 +481,7 @@ def _execute_action(
             sync_job_id=sync_job_id,
             handoff_coordinator=handoff_coordinator,
             backend_factory=backend_factory,
+            handoff_event_loop=handoff_event_loop,
             chrome=chrome,
         )
         return {}
@@ -539,11 +553,28 @@ def _execute_action(
     if name == "parse_table":
         source = str(action.get("source") or "last_download")
         fmt = str(action.get("format") or "csv").lower()
-        path = extracted.get(source) or capture_files[-1].get("local_path") or capture_files[-1]["storage_path"]
-        rows, encoding = _parse_downloaded_table_with_metadata(Path(str(path)), fmt=fmt)
+        skip_rows = int(action.get("skip_rows") or 0)
+        archive = str(action.get("archive") or "").strip().lower()
+        drop_row_prefix = str(action.get("drop_row_prefix") or "")
+        path = Path(str(extracted.get(source) or capture_files[-1].get("local_path") or capture_files[-1]["storage_path"]))
+        # Some platforms (e.g. PDD 货款明细) deliver the report wrapped in a (non-encrypted) zip
+        # containing a single csv/xlsx. Extract the inner table before parsing.
+        if archive == "zip" or path.suffix.lower() == ".zip":
+            path = _extract_single_table_from_zip(path)
+        rows, encoding = _parse_downloaded_table_with_metadata(path, fmt=fmt, skip_rows=skip_rows)
+        if drop_row_prefix:
+            # Drop trailing summary lines whose first column starts with the marker
+            # (e.g. PDD bill footer rows "#收入合计：...", "#导出时间：...").
+            rows = [
+                row for row in rows
+                if not str(next(iter(row.values()), "")).startswith(drop_row_prefix)
+            ]
         if capture_files:
             capture_files[-1]["encoding"] = encoding
             capture_files[-1]["row_count"] = len(rows)
+        return {"rows": rows}
+    if name == "paginate_capture_json":
+        rows = _paginate_capture_json(page, action, timeout_ms=timeout_ms, overlays=overlays)
         return {"rows": rows}
     if name == "assert":
         target = _resolve_value(action, params, extracted)
@@ -586,6 +617,7 @@ def _execute_login_action(
     sync_job_id: str = "",
     handoff_coordinator: RemoteControlCoordinator | None = None,
     backend_factory: Any = None,
+    handoff_event_loop: Any = None,
     chrome: Any = None,
 ) -> None:
     username_selector = str(action.get("username_selector") or "").strip()
@@ -616,6 +648,7 @@ def _execute_login_action(
         sync_job_id=sync_job_id,
         handoff_coordinator=handoff_coordinator,
         backend_factory=backend_factory,
+        handoff_event_loop=handoff_event_loop,
         chrome=chrome,
     )
     post_login_wait_selector = str(action.get("post_login_wait_selector") or "").strip()
@@ -629,6 +662,7 @@ def _execute_login_action(
             sync_job_id=sync_job_id,
             handoff_coordinator=handoff_coordinator,
             backend_factory=backend_factory,
+            handoff_event_loop=handoff_event_loop,
             chrome=chrome,
         )
 
@@ -646,6 +680,7 @@ def _find_login_context(
     sync_job_id: str = "",
     handoff_coordinator: RemoteControlCoordinator | None = None,
     backend_factory: Any = None,
+    handoff_event_loop: Any = None,
     chrome: Any = None,
 ) -> Any:
     attempt_timeout_ms = min(timeout_ms, _LOGIN_SELECTOR_ATTEMPT_TIMEOUT_MS)
@@ -725,6 +760,7 @@ def _find_login_context(
                     sync_job_id=sync_job_id,
                     coordinator=handoff_coordinator,
                     backend_factory=backend_factory,
+                    handoff_event_loop=handoff_event_loop,
                     chrome=chrome,
                 )
                 if risk_cleared:
@@ -850,8 +886,19 @@ def _wait_for_blocking_states_to_clear(
     return _blocking_states_cleared(contexts, blocking)
 
 
-def _run_async_safely(coro: Any) -> None:
+def _run_async_safely(coro: Any, *, event_loop: Any = None) -> None:
     try:
+        if event_loop is not None:
+            future = asyncio.run_coroutine_threadsafe(coro, event_loop)
+
+            def _log_future_error(done: Any) -> None:
+                try:
+                    done.result()
+                except Exception:
+                    logger.exception("handoff async callback failed")
+
+            future.add_done_callback(_log_future_error)
+            return
         asyncio.run(coro)
     except Exception:
         logger.exception("handoff async callback failed")
@@ -877,6 +924,7 @@ def _wait_for_risk_to_clear_with_handoff(
     chrome: Any = None,
     blocking_states: set[str] | None = None,
     still_blocked_reason: str = "risk verification still blocked",
+    handoff_event_loop: Any = None,
 ) -> bool:
     blocking = set(blocking_states or {"RISK_VERIFICATION"})
     if coordinator is None:
@@ -913,14 +961,14 @@ def _wait_for_risk_to_clear_with_handoff(
                     sync_job_id=sync_job_id,
                     backend=backend,
                     frame=backend.capture_frame(),
-                ))
+                ), event_loop=handoff_event_loop)
             if _blocking_states_cleared(contexts, blocking):
                 _run_async_safely(coordinator.emit_status({
                     "type": "handoff_completed",
                     "sync_job_id": sync_job_id,
                     "handoff_session_id": backend.handoff_session_id,
                     "controller_id": backend.controller_id,
-                }))
+                }), event_loop=handoff_event_loop)
                 return True
             if backend.pop_resume_check_requested() and not _blocking_states_cleared(contexts, blocking):
                 _run_async_safely(coordinator.emit_status({
@@ -929,7 +977,7 @@ def _wait_for_risk_to_clear_with_handoff(
                     "handoff_session_id": backend.handoff_session_id,
                     "controller_id": backend.controller_id,
                     "reason": still_blocked_reason,
-                }))
+                }), event_loop=handoff_event_loop)
             remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
             wait_ms = min(max(1, poll_interval_ms), remaining_ms)
             _wait_for_timeout(page, wait_ms)
@@ -950,6 +998,7 @@ def _await_navigate_risk_clearance(
     sync_job_id: str = "",
     handoff_coordinator: RemoteControlCoordinator | None = None,
     backend_factory: Any = None,
+    handoff_event_loop: Any = None,
     chrome: Any = None,
 ) -> str | None:
     """navigate 落到风控页时,不立即失败:保持页面打开,轮询等待人工清除,
@@ -971,6 +1020,7 @@ def _await_navigate_risk_clearance(
         sync_job_id=sync_job_id,
         coordinator=handoff_coordinator,
         backend_factory=backend_factory,
+        handoff_event_loop=handoff_event_loop,
         chrome=chrome,
     )
     return None if cleared else "RISK_VERIFICATION"
@@ -1275,6 +1325,140 @@ def _set_date_value(
     logger.info("browser date input committed: selector=%s value=%s", selector, value)
 
 
+_CALENDAR_PICK_JS = """
+(args) => {
+  const {headerSel, cellSel, oom, targetHeader, day} = args;
+  const headers = Array.from(document.querySelectorAll(headerSel));
+  const target = headers.find(h => (h.textContent || '').trim() === targetHeader);
+  if (!target) {
+    return {ok: false, reason: 'header_not_found', headers: headers.map(h => (h.textContent || '').trim())};
+  }
+  const hr = target.getBoundingClientRect();
+  const hx = hr.left + hr.width / 2;
+  const cells = Array.from(document.querySelectorAll(cellSel)).filter(c =>
+    (c.textContent || '').trim() === String(day) &&
+    !(c.className || '').toString().includes(oom) &&
+    c.offsetParent !== null
+  );
+  if (!cells.length) return {ok: false, reason: 'no_day_cell'};
+  // The picker shows two month panels side by side; pick the day cell whose horizontal
+  // center is closest to the target month's header — i.e. the cell in that month's panel.
+  cells.sort((a, b) => {
+    const ax = a.getBoundingClientRect(); const bx = b.getBoundingClientRect();
+    return Math.abs(ax.left + ax.width / 2 - hx) - Math.abs(bx.left + bx.width / 2 - hx);
+  });
+  cells[0].click();
+  return {ok: true};
+}
+"""
+
+
+def _calendar_visible_year_months(page: Any, header_selector: str) -> list[tuple[int, int]]:
+    """Return the (year, month) of each visible calendar panel header, e.g. '2026年6月'."""
+    texts = page.evaluate(
+        "(sel) => Array.from(document.querySelectorAll(sel)).map(h => (h.textContent || '').trim())",
+        header_selector,
+    )
+    months: list[tuple[int, int]] = []
+    for text in texts or []:
+        m = re.search(r"(\d{4})\D+(\d{1,2})", str(text))
+        if m:
+            months.append((int(m.group(1)), int(m.group(2))))
+    return months
+
+
+def _set_range_calendar_day(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    value: str,
+    timeout_ms: int,
+    overlays: list[dict[str, Any]] | None = None,
+) -> None:
+    """Select a single-day range (start==end==biz_date) in a click-only calendar RangePicker.
+
+    For pickers whose input is readonly (calendar-only, no text entry, no quick presets), so
+    ``set_date`` cannot type a value. Opens the picker, navigates month panels until biz_date's
+    month is visible (so an arbitrary past biz_date can be back-filled, not just T-1), then clicks
+    that day cell in its month's panel twice (range start then end).
+    """
+    selector = str(action.get("selector") or "").strip()
+    if not selector or not value:
+        raise BrowserActionError("PAGE_CHANGED", "set_range_calendar_day requires selector and value")
+    match = re.match(r"\s*(\d{4})-(\d{1,2})-(\d{1,2})", str(value))
+    if not match:
+        raise BrowserActionError("PAGE_CHANGED", f"set_range_calendar_day value is not a date: {value}")
+    year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    target_header = str(action.get("panel_header_format") or "{year}年{month}月").format(
+        year=year, month=month, day=day
+    )
+    header_selector = str(action.get("header_selector") or '[class*="RPR_panelHeader"]')
+    day_cell_selector = str(action.get("day_cell_selector") or '[class*="RPR_cell_"]')
+    out_of_month_marker = str(action.get("out_of_month_marker") or "outOfMonth")
+    prev_month_selector = str(
+        action.get("prev_month_selector") or '[class*="RPR_iconPrevNext"][class*="ICN_type-left"]'
+    )
+    next_month_selector = str(
+        action.get("next_month_selector") or '[class*="RPR_iconPrevNext"][class*="RPR_right"]'
+    )
+    confirm_selector = str(action.get("confirm_selector") or "").strip()
+
+    _dismiss_configured_overlays(page, overlays)
+    _dismiss_overlays_and_retry_once(
+        page, overlays, lambda: page.locator(selector).first.click(timeout=timeout_ms)
+    )
+    page.wait_for_timeout(400)
+
+    # Navigate month panels until biz_date's month is visible. The picker shows two adjacent
+    # months; click prev when the target is earlier than what's shown, next when later.
+    target_index = year * 12 + month
+    for _ in range(60):
+        visible = _calendar_visible_year_months(page, header_selector)
+        if not visible:
+            break
+        indices = [y * 12 + m for (y, m) in visible]
+        if target_index in indices:
+            break
+        nav_selector = prev_month_selector if target_index < min(indices) else next_month_selector
+        try:
+            page.locator(nav_selector).first.click(timeout=timeout_ms)
+        except Exception as exc:
+            raise BrowserActionError(
+                "PAGE_CHANGED",
+                f"calendar month navigation failed for {value} (visible={visible}): {exc}",
+            )
+        page.wait_for_timeout(250)
+    else:
+        raise BrowserActionError(
+            "PAGE_CHANGED", f"calendar could not navigate to month of {value}"
+        )
+
+    js_args = {
+        "headerSel": header_selector,
+        "cellSel": day_cell_selector,
+        "oom": out_of_month_marker,
+        "targetHeader": target_header,
+        "day": day,
+    }
+    # First click sets the range start; the second sets the range end (same day).
+    for position in ("start", "end"):
+        result = page.evaluate(_CALENDAR_PICK_JS, js_args)
+        if not isinstance(result, dict) or not result.get("ok"):
+            raise BrowserActionError(
+                "PAGE_CHANGED",
+                f"calendar {position} day not found for {value}: {result}",
+            )
+        page.wait_for_timeout(250)
+
+    if confirm_selector:
+        try:
+            page.locator(confirm_selector).first.click(timeout=timeout_ms)
+        except Exception as exc:
+            logger.info("browser calendar confirm click skipped: %s", exc)
+    page.wait_for_timeout(300)
+    logger.info("browser calendar range set: selector=%s value=%s", selector, value)
+
+
 def _select_checkboxes(
     page: Any,
     action: dict[str, Any],
@@ -1407,6 +1591,7 @@ def _wait_for_post_login_selector(
     sync_job_id: str = "",
     handoff_coordinator: RemoteControlCoordinator | None = None,
     backend_factory: Any = None,
+    handoff_event_loop: Any = None,
     chrome: Any = None,
 ) -> None:
     contexts = [login_context]
@@ -1445,6 +1630,7 @@ def _wait_for_post_login_selector(
                             sync_job_id=sync_job_id,
                             coordinator=handoff_coordinator,
                             backend_factory=backend_factory,
+                            handoff_event_loop=handoff_event_loop,
                             chrome=chrome,
                         )
                 elif detected == "AUTH_EXPIRED" and not auth_handoff_detected:
@@ -1465,6 +1651,7 @@ def _wait_for_post_login_selector(
                             sync_job_id=sync_job_id,
                             coordinator=handoff_coordinator,
                             backend_factory=backend_factory,
+                            handoff_event_loop=handoff_event_loop,
                             chrome=chrome,
                             blocking_states={"AUTH_EXPIRED", "RISK_VERIFICATION"},
                             still_blocked_reason="auth expired or verification still blocked",
@@ -2218,29 +2405,68 @@ class BrowserActionError(Exception):
         self.fail_reason = fail_reason
 
 
-def _read_csv_with_fallback(path: Path) -> tuple[Any, str]:
+def _read_csv_with_fallback(path: Path, *, skip_rows: int = 0) -> tuple[Any, str]:
     import pandas as pd
 
+    skiprows = skip_rows or None
     last_error: Exception | None = None
     for encoding in ("utf-8-sig", "gb18030", "gbk"):
         try:
-            return pd.read_csv(path, encoding=encoding, dtype=str, keep_default_na=False), encoding
+            return pd.read_csv(
+                path, encoding=encoding, dtype=str, keep_default_na=False, skiprows=skiprows
+            ), encoding
         except UnicodeDecodeError as exc:
             last_error = exc
     if last_error:
         raise last_error
-    return pd.read_csv(path, dtype=str, keep_default_na=False), ""
+    return pd.read_csv(path, dtype=str, keep_default_na=False, skiprows=skiprows), ""
 
 
-def _parse_downloaded_table_with_metadata(path: Path, *, fmt: str) -> tuple[list[dict[str, Any]], str]:
-    """Parse a downloaded CSV/XLSX file and return rows plus detected encoding."""
+def _extract_single_table_from_zip(zip_path: Path) -> Path:
+    """Extract the single csv/xlsx member from a (non-encrypted) downloaded zip.
+
+    PDD 货款明细导出 delivers ``*.zip`` wrapping one csv. We extract it next to the zip and
+    return the extracted path so the normal csv/xlsx parser can read it. Raises PAGE_CHANGED
+    if the archive is encrypted or does not contain exactly one table file.
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            members = [
+                info for info in zf.infolist()
+                if not info.is_dir() and info.filename.lower().rsplit(".", 1)[-1] in {"csv", "xlsx"}
+            ]
+            if len(members) != 1:
+                raise BrowserActionError(
+                    "PAGE_CHANGED",
+                    f"expected exactly one csv/xlsx in zip, found {len(members)}",
+                )
+            member = members[0]
+            if member.flag_bits & 0x1:
+                raise BrowserActionError("PAGE_CHANGED", "zip member is password-encrypted")
+            target = zip_path.with_name(f"{zip_path.stem}__{Path(member.filename).name}")
+            with zf.open(member) as src, open(target, "wb") as dst:
+                dst.write(src.read())
+            return target
+    except zipfile.BadZipFile as exc:
+        raise BrowserActionError("PAGE_CHANGED", f"downloaded file is not a valid zip: {exc}")
+
+
+def _parse_downloaded_table_with_metadata(
+    path: Path, *, fmt: str, skip_rows: int = 0
+) -> tuple[list[dict[str, Any]], str]:
+    """Parse a downloaded CSV/XLSX file and return rows plus detected encoding.
+
+    ``skip_rows`` skips that many leading lines before the header row, for reports whose real
+    column header is not the first line (e.g. PDD bill csv has title/time-range/separator lines
+    above the header).
+    """
     import pandas as pd
 
     if fmt == "xlsx":
-        df = pd.read_excel(path, dtype=str, keep_default_na=False)
+        df = pd.read_excel(path, dtype=str, keep_default_na=False, skiprows=skip_rows or None)
         encoding = ""
     else:
-        df, encoding = _read_csv_with_fallback(path)
+        df, encoding = _read_csv_with_fallback(path, skip_rows=skip_rows)
     rows = [
         {str(k): ("" if pd.isna(v) else v) for k, v in row.items()}
         for row in df.to_dict("records")
@@ -2255,6 +2481,179 @@ def _parse_downloaded_table(path: Path, *, fmt: str) -> list[dict[str, Any]]:
     """
     rows, _encoding = _parse_downloaded_table_with_metadata(path, fmt=fmt)
     return rows
+
+
+def _json_get(obj: Any, path: str) -> Any:
+    """Resolve a dotted JSON path with numeric list indices, e.g. 'data.results' or 'a.0.b'."""
+    cur = obj
+    for seg in str(path).split("."):
+        if cur is None or seg == "":
+            return cur if seg == "" else None
+        if isinstance(cur, list):
+            try:
+                cur = cur[int(seg)]
+            except (ValueError, IndexError, TypeError):
+                return None
+        elif isinstance(cur, dict):
+            cur = cur.get(seg)
+        else:
+            return None
+    return cur
+
+
+def _apply_json_transform(value: Any, transform: str) -> Any:
+    """Optional value transform for captured JSON fields (path suffix after '|')."""
+    if value is None:
+        return ""
+    if transform == "epoch_ms":  # JD orderCreateTime etc. are epoch milliseconds
+        try:
+            dt = datetime.fromtimestamp(int(value) / 1000, tz=timezone(timedelta(hours=8)))
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return value
+    return value
+
+
+def _extract_json_field(item: Any, spec: str) -> Any:
+    """Extract one column value from a JSON row.
+
+    ``spec`` is ``path`` or ``path|transform``. A ``[]`` segment maps over a list and joins the
+    leaf values with ' | ' (e.g. 'orderItems[].skuName' -> all item names of a multi-item order).
+    """
+    path, _, transform = str(spec).partition("|")
+    if "[]" in path:
+        before, _, after = path.partition("[]")
+        after = after.lstrip(".")
+        before = before.rstrip(".")
+        lst = _json_get(item, before) if before else item
+        if not isinstance(lst, list):
+            return ""
+        vals = [(_json_get(el, after) if after else el) for el in lst]
+        return " | ".join("" if v is None else str(v) for v in vals)
+    return _apply_json_transform(_json_get(item, path), transform)
+
+
+def _wait_for_predicate(page: Any, predicate, timeout_ms: int) -> bool:
+    deadline = time.monotonic() + max(0, timeout_ms) / 1000
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        page.wait_for_timeout(200)
+    return bool(predicate())
+
+
+def _is_enabled_clickable(locator: Any) -> bool:
+    try:
+        if locator.count() == 0 or not locator.is_visible():
+            return False
+        cls = (locator.get_attribute("class") or "").lower()
+        if "disabl" in cls:
+            return False
+        if (locator.get_attribute("aria-disabled") or "") == "true":
+            return False
+        return bool(locator.is_enabled())
+    except Exception:
+        return False
+
+
+def _paginate_capture_json(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    timeout_ms: int,
+    overlays: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Collect rows from a paginated table by capturing the JSON the page already fetches.
+
+    For platforms whose export is encrypted but whose on-page table is XHR/JSON-backed: drive the
+    UI (click the query trigger, then the next-page control) like a human, and harvest the JSON
+    responses the page receives — no crafted/replayed API calls. Each captured body's
+    ``results_path`` array is mapped to columns via ``field_map`` (col -> 'json.path' or
+    'json.path|transform'). Pagination stops when collected rows reach ``total_path`` or the
+    next-page control is gone/disabled.
+    """
+    capture_contains = str(action.get("capture_url_contains") or "").strip()
+    field_map = dict(action.get("field_map") or {})
+    if not capture_contains or not field_map:
+        raise BrowserActionError(
+            "PAGE_CHANGED", "paginate_capture_json requires capture_url_contains and field_map"
+        )
+    results_path = str(action.get("results_path") or "data.results")
+    total_path = str(action.get("total_path") or "")
+    next_selector = str(action.get("next_selector") or "")
+    trigger_selector = str(action.get("trigger_selector") or "")
+    max_pages = int(action.get("max_pages") or 500)
+    page_wait_ms = int(action.get("page_wait_ms") or 10000)
+
+    captured: list[Any] = []
+
+    def _on_response(resp: Any) -> None:
+        try:
+            if capture_contains in resp.url:
+                captured.append(resp.json())
+        except Exception:
+            pass
+
+    page.on("response", _on_response)
+    try:
+        if trigger_selector:
+            _dismiss_configured_overlays(page, overlays)
+            page.locator(trigger_selector).first.click(timeout=timeout_ms)
+        if not _wait_for_predicate(page, lambda: len(captured) >= 1, page_wait_ms):
+            raise BrowserActionError("PAGE_CHANGED", "paginate_capture_json captured no data response")
+
+        rows: list[dict[str, Any]] = []
+        processed = 0
+        total: int | None = None
+        pages = 0
+        while pages < max_pages:
+            while processed < len(captured):
+                body = captured[processed]
+                processed += 1
+                pages += 1
+                results = _json_get(body, results_path)
+                if isinstance(results, list):
+                    for elem in results:
+                        # Some APIs (e.g. Douyin 资金流水 query_item) return each row as a
+                        # JSON-encoded string inside the array; decode it before field extraction.
+                        if isinstance(elem, str):
+                            try:
+                                elem = json.loads(elem)
+                            except Exception:
+                                continue
+                        rows.append({col: _extract_json_field(elem, spec) for col, spec in field_map.items()})
+                if total is None and total_path:
+                    raw_total = _json_get(body, total_path)
+                    if raw_total is not None:
+                        try:
+                            total = int(raw_total)
+                        except (TypeError, ValueError):
+                            total = None
+            if total is not None and len(rows) >= total:
+                break
+            if not next_selector:
+                break
+            nxt = page.locator(next_selector).first
+            if not _is_enabled_clickable(nxt):
+                break
+            before = len(captured)
+            try:
+                _dismiss_configured_overlays(page, overlays)
+                nxt.click(timeout=timeout_ms)
+            except Exception as exc:
+                logger.info("paginate_capture_json next-page click stopped: %s", exc)
+                break
+            if not _wait_for_predicate(page, lambda: len(captured) > before, page_wait_ms):
+                break
+        logger.info(
+            "paginate_capture_json done: rows=%s pages=%s total=%s", len(rows), pages, total
+        )
+        return rows
+    finally:
+        try:
+            page.remove_listener("response", _on_response)
+        except Exception:
+            pass
 
 
 def run_playbook_with_playwright(
@@ -2288,6 +2687,7 @@ def _run_playbook_with_playwright_inner(
     job_id = str(message.get("job_id") or "unknown")
     handoff_coordinator = message.get("handoff_coordinator")
     backend_factory = message.get("handoff_backend_factory")
+    handoff_event_loop = message.get("handoff_event_loop")
 
     user_data_dir = build_user_data_dir(
         config=config,
@@ -2400,6 +2800,7 @@ def _run_playbook_with_playwright_inner(
                                 storage_context=storage_context,
                                 handoff_coordinator=handoff_coordinator,
                                 backend_factory=backend_factory,
+                                handoff_event_loop=handoff_event_loop,
                                 chrome=chrome,
                                 overlays=overlays,
                             )

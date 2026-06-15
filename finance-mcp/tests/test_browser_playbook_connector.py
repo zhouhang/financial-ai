@@ -135,6 +135,8 @@ def test_browser_playbook_dataset_collection_queues_sync_job_without_inline_exec
             "playbook_status": "ok",
         },
     )
+    monkeypatch.setattr(data_sources.auth_db, "find_inflight_dataset_collection_sync_job", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources.auth_db, "find_success_dataset_collection_sync_job", lambda **kwargs: None)
 
     def fake_create_or_reuse_dataset_collection_sync_job(**kwargs):
         created_request_payloads.append(dict(kwargs["request_payload"]))
@@ -489,6 +491,16 @@ def test_update_browser_playbook_credential_returns_safe_summary(monkeypatch) ->
         }
 
     monkeypatch.setattr(data_sources, "update_browser_playbook_credential", fake_update)
+
+    monkeypatch.setattr(
+        data_sources,
+        "_build_data_source_view",
+        lambda source_row, datasets=None, include_dataset_details=False: {
+            "id": source_row["id"],
+            "datasets": datasets or [],
+        },
+    )
+
     async def fake_retry_verification(arguments):
         return {
             "success": True,
@@ -649,6 +661,8 @@ def test_browser_dataset_collection_rejects_unhealthy_binding_before_sync_job(mo
         },
     )
     monkeypatch.setattr(data_sources.auth_db, "get_latest_source_dataset_checkpoint", lambda **kwargs: {})
+    monkeypatch.setattr(data_sources.auth_db, "find_inflight_dataset_collection_sync_job", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources.auth_db, "find_success_dataset_collection_sync_job", lambda **kwargs: None)
 
     def fail_if_created(**kwargs):
         raise AssertionError("unhealthy browser binding must not create sync job")
