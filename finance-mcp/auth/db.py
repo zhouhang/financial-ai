@@ -11039,6 +11039,7 @@ def list_execution_run_exceptions(
     run_id: str,
     limit: int = 500,
     offset: int = 0,
+    include_closed: bool = False,
 ) -> list[dict]:
     """按执行记录查询异常列表。"""
     conn_manager = get_conn()
@@ -11055,10 +11056,11 @@ def list_execution_run_exceptions(
                     FROM execution_run_exceptions
                     WHERE company_id = %s
                       AND run_id = %s
+                      AND (%s OR is_closed = FALSE)
                     ORDER BY created_at DESC
                     LIMIT %s OFFSET %s
                     """,
-                    (company_id, run_id, limit, offset),
+                    (company_id, run_id, bool(include_closed), limit, offset),
                 )
                 rows = cur.fetchall()
                 return [_normalize_record(dict(row)) for row in rows]
@@ -11073,6 +11075,7 @@ def get_public_execution_run_exception_bundle(
     owner_identifier: str = "",
     limit: int = 100,
     offset: int = 0,
+    include_closed: bool = False,
 ) -> dict | None:
     """公开只读查询一次执行运行及其异常明细。
 
@@ -11154,8 +11157,9 @@ def get_public_execution_run_exception_bundle(
                     FROM execution_run_exceptions
                     WHERE run_id = %s
                       AND (%s = '' OR owner_identifier = %s)
+                      AND (%s OR is_closed = FALSE)
                     """,
-                    (normalized_run_id, normalized_owner, normalized_owner),
+                    (normalized_run_id, normalized_owner, normalized_owner, bool(include_closed)),
                 )
                 total_row = cur.fetchone() or {}
                 total = int(total_row.get("total") or 0)
@@ -11170,10 +11174,18 @@ def get_public_execution_run_exception_bundle(
                     FROM execution_run_exceptions
                     WHERE run_id = %s
                       AND (%s = '' OR owner_identifier = %s)
+                      AND (%s OR is_closed = FALSE)
                     ORDER BY created_at DESC
                     LIMIT %s OFFSET %s
                     """,
-                    (normalized_run_id, normalized_owner, normalized_owner, safe_limit, safe_offset),
+                    (
+                        normalized_run_id,
+                        normalized_owner,
+                        normalized_owner,
+                        bool(include_closed),
+                        safe_limit,
+                        safe_offset,
+                    ),
                 )
                 exception_rows = cur.fetchall()
                 exceptions = [_normalize_record(dict(row)) for row in exception_rows]
@@ -11512,6 +11524,7 @@ def apply_diff_digestion_results(
                             """
                             UPDATE execution_run_exceptions
                             SET is_closed = TRUE,
+                                processing_status = 'verified_closed',
                                 fix_status = 'resolved_by_digestion',
                                 resolved_to = %s,
                                 resolved_at = CURRENT_TIMESTAMP,

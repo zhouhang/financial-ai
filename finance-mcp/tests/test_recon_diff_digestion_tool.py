@@ -170,7 +170,7 @@ def _fetch_exception(exception_id: str) -> dict:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT anomaly_type, is_closed, fix_status,
+                SELECT anomaly_type, is_closed, processing_status, fix_status,
                        review_round, resolved_at, resolved_to, summary, detail_json
                 FROM execution_run_exceptions WHERE id = %s
                 """,
@@ -179,6 +179,15 @@ def _fetch_exception(exception_id: str) -> dict:
             row = cur.fetchone()
     assert row is not None, f"exception {exception_id} 不存在"
     return dict(row)
+
+
+def _list_exception_ids(run_id: str, *, include_closed: bool = False) -> list[str]:
+    rows = auth_db.list_execution_run_exceptions(
+        company_id=COMPANY_ID,
+        run_id=run_id,
+        include_closed=include_closed,
+    )
+    return [str(row["id"]) for row in rows]
 
 
 def _delete_run(run_id: str) -> None:
@@ -252,6 +261,7 @@ class TestApplyDiffDigestionResults:
         resolved_row = _fetch_exception(digestion_run["resolved"])
         assert resolved_row["is_closed"] is True
         assert resolved_row["fix_status"] == "resolved_by_digestion"
+        assert resolved_row["processing_status"] == "verified_closed"
         assert resolved_row["resolved_to"] == "matched"
         assert resolved_row["resolved_at"] is not None
         assert resolved_row["review_round"] == 1
@@ -283,6 +293,16 @@ class TestApplyDiffDigestionResults:
         assert run_row["review_round"] == 1
         assert run_row["last_resolved_at"] is not None
         # anomaly_count 必须同步更新为剩余 open 差异数(前端看板读此列)
+
+        assert _list_exception_ids(run_id) == [
+            digestion_run["kept"],
+            digestion_run["reclassified"],
+        ]
+        assert set(_list_exception_ids(run_id, include_closed=True)) == {
+            digestion_run["resolved"],
+            digestion_run["reclassified"],
+            digestion_run["kept"],
+        }
         assert run_row["anomaly_count"] == 2  # target_only(1) + matched_with_diff(1)
         resolution = run_row["resolution_summary_json"]
         assert resolution["resolved"] == 1

@@ -381,10 +381,10 @@ async def test_digest_finalize_daily_and_delivery_record_delegate_to_repository(
 
 @pytest.mark.asyncio
 async def test_public_exception_bundle_accepts_jwt_and_raw_run_id(monkeypatch) -> None:
-    seen: list[str] = []
+    seen: list[dict[str, object]] = []
 
     def fake_bundle(**kwargs):
-        seen.append(kwargs["run_id"])
+        seen.append(dict(kwargs))
         return {"run": {"id": kwargs["run_id"]}, "scheme": {}, "exceptions": []}
 
     monkeypatch.setattr(
@@ -400,9 +400,11 @@ async def test_public_exception_bundle_accepts_jwt_and_raw_run_id(monkeypatch) -
     )
     raw_result = await execution_runs.handle_tool_call(
         "execution_run_public_exception_bundle",
-        {"run_id": "run-002"},
+        {"run_id": "run-002", "include_closed": True},
     )
 
     assert token_result["success"] is True
     assert raw_result["success"] is True
-    assert seen == ["run-001", "run-002"]
+    assert [item["run_id"] for item in seen] == ["run-001", "run-002"]
+    assert seen[0]["include_closed"] is False
+    assert seen[1]["include_closed"] is True

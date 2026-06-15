@@ -83,6 +83,84 @@ def test_public_digest_bundle_uses_default_line_limit(
     assert captured == {"token": "digest-token", "view": "finance", "line_limit": 500}
 
 
+def test_public_run_exceptions_defaults_to_open_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_bundle(
+        run_id: str,
+        *,
+        owner_identifier: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        include_closed: bool = False,
+    ) -> dict[str, object]:
+        captured.update(
+            {
+                "run_id": run_id,
+                "owner_identifier": owner_identifier,
+                "limit": limit,
+                "offset": offset,
+                "include_closed": include_closed,
+            }
+        )
+        return {"success": True, "exceptions": [], "total": 0}
+
+    monkeypatch.setattr(auto_run_api, "execution_run_public_exception_bundle", fake_bundle)
+
+    response = _client().get("/recon/public/runs/run-001/exceptions?owner=owner-001")
+
+    assert response.status_code == 200
+    assert captured == {
+        "run_id": "run-001",
+        "owner_identifier": "owner-001",
+        "limit": 100,
+        "offset": 0,
+        "include_closed": False,
+    }
+
+
+def test_public_run_exceptions_can_include_closed_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_bundle(
+        run_id: str,
+        *,
+        owner_identifier: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        include_closed: bool = False,
+    ) -> dict[str, object]:
+        captured.update(
+            {
+                "run_id": run_id,
+                "owner_identifier": owner_identifier,
+                "limit": limit,
+                "offset": offset,
+                "include_closed": include_closed,
+            }
+        )
+        return {"success": True, "exceptions": [], "total": 0}
+
+    monkeypatch.setattr(auto_run_api, "execution_run_public_exception_bundle", fake_bundle)
+
+    response = _client().get(
+        "/recon/public/runs/run-001/exceptions?limit=25&offset=50&include_closed=true"
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "run_id": "run-001",
+        "owner_identifier": "",
+        "limit": 25,
+        "offset": 50,
+        "include_closed": True,
+    }
+
+
 def test_public_digest_bundle_returns_404_when_mcp_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

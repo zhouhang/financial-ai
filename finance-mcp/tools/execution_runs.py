@@ -2939,6 +2939,7 @@ def _run_exceptions(arguments: dict[str, Any]) -> dict[str, Any]:
         run_id=run_id,
         limit=_as_int(arguments.get("limit"), 500, minimum=1, maximum=1000),
         offset=_as_int(arguments.get("offset"), 0, minimum=0),
+        include_closed=_as_bool(arguments.get("include_closed"), False),
     )
     run = auth_db.get_execution_run(company_id=company_id, run_id=run_id) or {}
     scheme = _get_run_scheme_for_hydration(company_id, run)
@@ -2970,6 +2971,7 @@ def _run_public_exception_bundle(arguments: dict[str, Any]) -> dict[str, Any]:
         owner_identifier=_as_text(arguments.get("owner_identifier") or arguments.get("owner")),
         limit=_as_int(arguments.get("limit"), 100, minimum=1, maximum=500),
         offset=_as_int(arguments.get("offset"), 0, minimum=0),
+        include_closed=_as_bool(arguments.get("include_closed"), False),
     )
     if not bundle:
         return {"success": False, "error": "执行记录不存在"}

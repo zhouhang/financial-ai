@@ -1503,12 +1503,19 @@ async def list_execution_run_exceptions_api(
     run_id: str,
     limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    include_closed: bool = Query(False),
     authorization: Optional[str] = Header(None),
 ):
     auth_token = _extract_auth_token(authorization)
     if not auth_token:
         raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
-    result = await execution_run_exceptions(auth_token, run_id, limit=limit, offset=offset)
+    result = await execution_run_exceptions(
+        auth_token,
+        run_id,
+        limit=limit,
+        offset=offset,
+        include_closed=include_closed,
+    )
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "查询异常处理失败"))
     return result
@@ -1520,12 +1527,14 @@ async def public_execution_run_exceptions_api(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     owner: str = Query("", alias="owner"),
+    include_closed: bool = Query(False),
 ):
     result = await execution_run_public_exception_bundle(
         run_id,
         owner_identifier=owner,
         limit=limit,
         offset=offset,
+        include_closed=include_closed,
     )
     if not result.get("success"):
         raise HTTPException(status_code=404, detail=result.get("error", "执行记录不存在"))

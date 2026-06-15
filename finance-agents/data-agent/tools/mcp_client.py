@@ -1013,10 +1013,17 @@ async def execution_run_exceptions(
     *,
     limit: int = 500,
     offset: int = 0,
+    include_closed: bool = False,
 ) -> dict[str, Any]:
     return await call_mcp_tool(
         "execution_run_exceptions",
-        {"auth_token": auth_token, "run_id": run_id, "limit": limit, "offset": offset},
+        {
+            "auth_token": auth_token,
+            "run_id": run_id,
+            "limit": limit,
+            "offset": offset,
+            "include_closed": include_closed,
+        },
     )
 
 
@@ -1026,10 +1033,17 @@ async def execution_run_public_exception_bundle(
     owner_identifier: str = "",
     limit: int = 100,
     offset: int = 0,
+    include_closed: bool = False,
 ) -> dict[str, Any]:
     return await call_mcp_tool(
         "execution_run_public_exception_bundle",
-        {"run_id": run_id, "owner_identifier": owner_identifier, "limit": limit, "offset": offset},
+        {
+            "run_id": run_id,
+            "owner_identifier": owner_identifier,
+            "limit": limit,
+            "offset": offset,
+            "include_closed": include_closed,
+        },
     )
 
 
@@ -1128,12 +1142,14 @@ async def execution_run_exception_list(
     *,
     limit: int = 500,
     offset: int = 0,
+    include_closed: bool = False,
 ) -> dict[str, Any]:
     return await execution_run_exceptions(
         auth_token,
         run_id,
         limit=limit,
         offset=offset,
+        include_closed=include_closed,
     )
 
 
