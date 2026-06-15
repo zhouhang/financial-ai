@@ -381,6 +381,76 @@ async def test_browser_trigger_reuses_success_same_biz_date_when_records_exist(
 
 
 @pytest.mark.anyio
+async def test_browser_trigger_reuses_verified_records_same_biz_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(data_sources, "_require_user", lambda _token: {"company_id": "company-1"})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda **_kwargs: {
+            "id": "source-browser-1",
+            "company_id": "company-1",
+            "status": "active",
+            "is_enabled": True,
+            "source_kind": "browser_playbook",
+            "provider_code": "browser_playbook",
+            "config": {},
+            "credential_ref": {},
+        },
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_load_runtime_source",
+        lambda _row, include_secret=False: {"source_kind": "browser_playbook"},
+    )
+    monkeypatch.setattr(data_sources.auth_db, "find_inflight_dataset_collection_sync_job", lambda **_kwargs: None)
+    monkeypatch.setattr(data_sources.auth_db, "find_success_dataset_collection_sync_job", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_browser_collection_records",
+        lambda **_kwargs: [{"id": "record-1", "latest_seen_job_id": "verification-job-1"}],
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_sync_job_by_id",
+        lambda sync_job_id: {
+            "id": sync_job_id,
+            "job_status": "success",
+            "is_verification": True,
+            "request_payload": {"dataset_id": "dataset-browser-1", "biz_date": "2026-05-25"},
+        },
+    )
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "create_or_reuse_dataset_collection_sync_job",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("verified browser records should prevent a new browser job")
+        ),
+    )
+
+    result = await data_sources._handle_data_source_trigger_sync(
+        {
+            "auth_token": "token-1",
+            "source_id": "source-browser-1",
+            "resource_key": "playbook-1@1",
+            "params": {
+                "collection_driver": data_sources.COLLECTION_DRIVER_BROWSER_PLAYBOOK,
+                "dataset_id": "dataset-browser-1",
+                "biz_date": "2026-05-25",
+            },
+        }
+    )
+
+    assert result["success"] is True
+    assert result["reused"] is True
+    assert result["queued"] is False
+    assert result["reuse_reason"] == "browser_biz_date_success"
+    assert result["job"]["id"] == "verification-job-1"
+
+
+@pytest.mark.anyio
 async def test_browser_trigger_reuses_success_same_biz_date_when_records_are_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

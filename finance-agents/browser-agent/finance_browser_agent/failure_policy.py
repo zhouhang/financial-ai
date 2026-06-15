@@ -22,6 +22,7 @@ DETERMINISTIC_FAILURES = frozenset(
         "RISK_VERIFICATION",
         "DATA_MISMATCH",
         "UNHEALTHY_BINDING",
+        "BROWSER_CLOSED",
     }
 )
 
@@ -36,6 +37,12 @@ TRANSIENT_FAILURES = frozenset(
     }
 )
 
+_BROWSER_CLOSED_MESSAGE_MARKERS = (
+    "target page, context or browser has been closed",
+    "target closed",
+    "browser has been closed",
+)
+
 
 @dataclass(frozen=True)
 class FailurePolicy:
@@ -45,7 +52,7 @@ class FailurePolicy:
     retry_delay_seconds: int = 1800
 
 
-def classify_failure(reason: str | None) -> FailurePolicy:
+def classify_failure(reason: str | None, *, error_message: str | None = None) -> FailurePolicy:
     """Classify a browser fail_reason into a retry policy.
 
     Unknown reasons are normalized to ``OTHER`` and treated as transient. This keeps the cloud
@@ -53,6 +60,9 @@ def classify_failure(reason: str | None) -> FailurePolicy:
     silently dropping the sync_job into a permanent failed state.
     """
     normalized = str(reason or "OTHER").strip().upper() or "OTHER"
+    message = str(error_message or "").strip().lower()
+    if any(marker in message for marker in _BROWSER_CLOSED_MESSAGE_MARKERS):
+        normalized = "BROWSER_CLOSED"
     if normalized in DETERMINISTIC_FAILURES:
         return FailurePolicy(normalized_reason=normalized, retryable=False)
     if normalized not in TRANSIENT_FAILURES:

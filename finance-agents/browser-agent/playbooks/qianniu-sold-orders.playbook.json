@@ -30,6 +30,19 @@
       "timeout_ms": 120000
     },
     {
+      "id": "ensure_sold_orders_ready_before_login",
+      "action": "ensure_page_ready",
+      "target_url": "https://myseller.taobao.com/home.htm/trade-platform/tp/sold",
+      "ready_selector": ".sold_sold-container__4qwKM, button:has-text('批量导出')",
+      "error_url_contains": ["error.htm"],
+      "auth_url_contains": ["login.taobao.com", "loginmyseller.taobao.com", "passport"],
+      "auth_text_contains": ["请先登录", "登录后继续"],
+      "allow_auth_redirect": true,
+      "recover_attempts": 2,
+      "wait_after_navigation_ms": 1000,
+      "timeout_ms": 120000
+    },
+    {
       "id": "login_if_needed",
       "action": "login_if_needed",
       "timeout_ms": 120000,
@@ -38,7 +51,45 @@
       "submit_selector": "button[type='submit'], #login-form button, .fm-button, .password-login",
       "username_value_from": "params.login_username",
       "password_value_from": "params.login_password",
-      "post_login_wait_selector": ".sold_sold-container__4qwKM, button:has-text('批量导出')"
+      "post_login_wait_selector": ".sold_sold-container__4qwKM, button:has-text('批量导出')",
+      "wait_for_post_login_selector": false
+    },
+    {
+      "id": "ensure_sold_orders_ready_after_login",
+      "action": "ensure_page_ready",
+      "target_url": "https://myseller.taobao.com/home.htm/trade-platform/tp/sold",
+      "ready_selector": ".sold_sold-container__4qwKM, button:has-text('批量导出')",
+      "error_url_contains": ["error.htm"],
+      "auth_url_contains": ["login.taobao.com", "loginmyseller.taobao.com", "passport"],
+      "auth_text_contains": ["请先登录", "登录后继续"],
+      "allow_auth_redirect": true,
+      "recover_attempts": 2,
+      "wait_after_navigation_ms": 1000,
+      "timeout_ms": 120000
+    },
+    {
+      "id": "login_if_needed_after_sold_orders_recovery",
+      "action": "login_if_needed",
+      "timeout_ms": 120000,
+      "username_selector": "#fm-login-id, input[name='fm-login-id'], input[name='TPL_username'], input[type='text']",
+      "password_selector": "#fm-login-password, input[name='fm-login-password'], input[name='TPL_password'], input[type='password']",
+      "submit_selector": "button[type='submit'], #login-form button, .fm-button, .password-login",
+      "username_value_from": "params.login_username",
+      "password_value_from": "params.login_password",
+      "post_login_wait_selector": ".sold_sold-container__4qwKM, button:has-text('批量导出')",
+      "wait_for_post_login_selector": false
+    },
+    {
+      "id": "ensure_sold_orders_ready_final",
+      "action": "ensure_page_ready",
+      "target_url": "https://myseller.taobao.com/home.htm/trade-platform/tp/sold",
+      "ready_selector": ".sold_sold-container__4qwKM, button:has-text('批量导出')",
+      "error_url_contains": ["error.htm"],
+      "auth_url_contains": ["login.taobao.com", "loginmyseller.taobao.com", "passport"],
+      "auth_text_contains": ["请先登录", "登录后继续"],
+      "recover_attempts": 2,
+      "wait_after_navigation_ms": 1000,
+      "timeout_ms": 120000
     },
     {
       "id": "set_pay_start_time",
@@ -129,6 +180,43 @@
       "id": "open_export_list",
       "action": "navigate",
       "url": "https://myseller.taobao.com/home.htm/trade-platform/tp/export-list",
+      "timeout_ms": 120000
+    },
+    {
+      "id": "ensure_export_list_ready",
+      "action": "ensure_page_ready",
+      "target_url": "https://myseller.taobao.com/home.htm/trade-platform/tp/export-list",
+      "ready_selector": "body:has-text('报表申请时间')",
+      "error_url_contains": ["error.htm"],
+      "auth_url_contains": ["login.taobao.com", "loginmyseller.taobao.com", "passport"],
+      "auth_text_contains": ["请先登录", "登录后继续"],
+      "allow_auth_redirect": true,
+      "recover_attempts": 2,
+      "wait_after_navigation_ms": 1000,
+      "timeout_ms": 120000
+    },
+    {
+      "id": "login_if_needed_export_list",
+      "action": "login_if_needed",
+      "timeout_ms": 120000,
+      "username_selector": "#fm-login-id, input[name='fm-login-id'], input[name='TPL_username'], input[type='text']",
+      "password_selector": "#fm-login-password, input[name='fm-login-password'], input[name='TPL_password'], input[type='password']",
+      "submit_selector": "button[type='submit'], #login-form button, .fm-button, .password-login",
+      "username_value_from": "params.login_username",
+      "password_value_from": "params.login_password",
+      "post_login_wait_selector": "body:has-text('报表申请时间')",
+      "wait_for_post_login_selector": false
+    },
+    {
+      "id": "ensure_export_list_ready_after_login",
+      "action": "ensure_page_ready",
+      "target_url": "https://myseller.taobao.com/home.htm/trade-platform/tp/export-list",
+      "ready_selector": "body:has-text('报表申请时间')",
+      "error_url_contains": ["error.htm"],
+      "auth_url_contains": ["login.taobao.com", "loginmyseller.taobao.com", "passport"],
+      "auth_text_contains": ["请先登录", "登录后继续"],
+      "recover_attempts": 2,
+      "wait_after_navigation_ms": 1000,
       "timeout_ms": 120000
     },
     {

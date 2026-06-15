@@ -464,6 +464,42 @@ def test_playbook_accepts_qianniu_export_report_download_action() -> None:
     assert msg.playbook_body.steps[6].requested_after_from == "extracted.report_requested_at"
 
 
+def test_playbook_accepts_ensure_page_ready_action() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps.insert(
+        1,
+        {
+            "id": "ensure_bill_page_ready",
+            "action": "ensure_page_ready",
+            "target_url": "https://myseller.taobao.com/home.htm/whale-accountant/bill/summary",
+            "ready_selector": "[data-summary='daily-bill']",
+            "error_url_contains": ["error.htm"],
+            "auth_url_contains": ["login.taobao.com"],
+            "auth_text_contains": ["请先登录"],
+            "allow_auth_redirect": True,
+            "recover_attempts": 2,
+            "wait_after_navigation_ms": 1000,
+        },
+    )
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.steps[1].action == "ensure_page_ready"
+    assert msg.playbook_body.steps[1].target_url.endswith("/whale-accountant/bill/summary")
+
+
 def test_playbook_rejects_qianniu_export_report_download_without_requested_after() -> None:
     playbook = _valid_playbook_body()
     steps = playbook["steps"]  # type: ignore[index]

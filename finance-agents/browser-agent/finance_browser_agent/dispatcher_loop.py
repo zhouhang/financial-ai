@@ -165,8 +165,8 @@ class BrowserDispatcherLoop:
             )
             return {"status": "success", "sync_job_id": sync_job_id}
         result = result if isinstance(result, dict) else {}
-        policy = classify_failure(str(result.get("fail_reason") or "OTHER"))
         error_message = str((result.get("error_info") or {}).get("message") or "browser task failed")
+        policy = classify_failure(str(result.get("fail_reason") or "OTHER"), error_message=error_message)
 
         # AUTH_EXPIRED: fire a handoff notification so someone can re-login via
         # the remote-control link.  Dedup per shop per day because the same shop

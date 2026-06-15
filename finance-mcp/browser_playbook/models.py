@@ -11,6 +11,7 @@ ActionType = Literal[
     "navigate",
     "click",
     "fill",
+    "ensure_page_ready",
     "set_date",
     "set_range_calendar_day",
     "wait_for",
@@ -117,8 +118,18 @@ class PlaybookStep(BaseModel):
     username_value_from: str | None = None
     password_value_from: str | None = None
     post_login_wait_selector: str | None = None
+    wait_for_post_login_selector: bool | None = None
     summary_field: str | None = None
     record_as: str | None = None
+    target_url: str | None = None
+    ready_selector: str | None = None
+    ready_selectors: list[str] | None = None
+    error_url_contains: list[str] | None = None
+    auth_url_contains: list[str] | None = None
+    auth_text_contains: list[str] | None = None
+    allow_auth_redirect: bool | None = None
+    recover_attempts: int | None = None
+    wait_after_navigation_ms: int | None = None
 
     @model_validator(mode="after")
     def validate_action_contract(self) -> "PlaybookStep":
@@ -126,6 +137,11 @@ class PlaybookStep(BaseModel):
             raise ValueError("step.id cannot be empty")
         if self.action == "navigate" and not str(self.url or "").startswith(("http://", "https://")):
             raise ValueError("navigate requires an absolute URL")
+        if self.action == "ensure_page_ready":
+            if not str(self.target_url or "").startswith(("http://", "https://")):
+                raise ValueError("ensure_page_ready requires an absolute target_url")
+            if not str(self.ready_selector or "").strip() and not self.ready_selectors:
+                raise ValueError("ensure_page_ready requires ready_selector or ready_selectors")
         if self.action in {"login", "login_if_needed"}:
             if (
                 not str(self.username_selector or "").strip()

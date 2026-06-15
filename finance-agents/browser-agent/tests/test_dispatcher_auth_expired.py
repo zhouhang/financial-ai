@@ -208,6 +208,25 @@ async def test_risk_verification_does_not_trigger_auth_expired_notification():
     assert len(risk_calls) == 0
 
 
+async def test_target_closed_failure_is_reported_as_terminal_browser_closed():
+    result = {
+        "status": "failed",
+        "fail_reason": "OTHER",
+        "error_info": {
+            "message": "Page.wait_for_timeout: Target page, context or browser has been closed"
+        },
+    }
+    loop, client, _risk_calls = _make_loop(result)
+
+    outcome = await loop.run_once()
+
+    assert outcome["status"] == "failed"
+    client.mark_browser_job_failed.assert_called_once()
+    payload = client.mark_browser_job_failed.call_args.args[0]
+    assert payload["fail_reason"] == "BROWSER_CLOSED"
+    assert payload["retryable"] is False
+
+
 # ---------------------------------------------------------------------------
 # Test 4: Different shops on the same day each get their own notification
 # ---------------------------------------------------------------------------

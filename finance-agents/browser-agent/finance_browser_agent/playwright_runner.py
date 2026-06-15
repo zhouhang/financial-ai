@@ -98,6 +98,7 @@ _DEFAULT_PASSWORD_LOGIN_SELECTORS = (
     "text=账号密码登录",
     "text=账户密码登录",
     "text=使用密码登录",
+    "text=账号登录",
     ".password-login",
     ".login-switch",
 )
@@ -333,6 +334,190 @@ def _resolve_value(action: dict[str, Any], params: dict[str, Any], extracted: di
     return _render_template(str(action.get("value") or ""), params=params, extracted=extracted)
 
 
+def _resolve_action_url(
+    action: dict[str, Any],
+    *,
+    key: str,
+    params: dict[str, Any],
+    extracted: dict[str, Any],
+) -> str:
+    value = action.get(key)
+    if value is None:
+        return ""
+    return _render_template(str(value or ""), params=params, extracted=extracted).strip()
+
+
+def _string_items(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item or "").strip() for item in value if str(item or "").strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _page_text(page: Any) -> str:
+    try:
+        locator_factory = getattr(page, "locator", None)
+        if callable(locator_factory):
+            return str(locator_factory("body").first.inner_text(timeout=500) or "")
+    except Exception:
+        pass
+    try:
+        return str(page.content() or "")
+    except Exception:
+        return ""
+
+
+def _contains_any_marker(value: str, markers: list[str]) -> bool:
+    lowered = value.lower()
+    return any(marker in value or marker.lower() in lowered for marker in markers)
+
+
+def _page_has_configured_auth_markers(page: Any, action: dict[str, Any]) -> bool:
+    url_markers = _string_items(action.get("auth_url_contains"))
+    text_markers = _string_items(action.get("auth_text_contains"))
+    if url_markers and _contains_any_marker(_page_url(page), url_markers):
+        return True
+    if text_markers and _contains_any_marker(_page_text(page), text_markers):
+        return True
+    return False
+
+
+def _page_has_configured_error_markers(page: Any, action: dict[str, Any]) -> bool:
+    return _contains_any_marker(_page_url(page), _string_items(action.get("error_url_contains")))
+
+
+def _ready_selectors(action: dict[str, Any]) -> list[str]:
+    selectors = _string_items(action.get("ready_selectors"))
+    primary = str(action.get("ready_selector") or "").strip()
+    if primary:
+        selectors.insert(0, primary)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        if selector and selector not in seen:
+            deduped.append(selector)
+            seen.add(selector)
+    return deduped
+
+
+def _page_has_ready_selector(page: Any, selectors: list[str], *, timeout_ms: int) -> bool:
+    for selector in selectors:
+        try:
+            page.wait_for_selector(selector, timeout=timeout_ms)
+            return True
+        except Exception:
+            locator = _safe_first_locator(page, selector)
+            if locator is not None and _locator_visible(locator, timeout_ms=timeout_ms):
+                return True
+    return False
+
+
+def _configured_page_state(page: Any, action: dict[str, Any]) -> str | None:
+    detected = _detect_auth_or_risk(page)
+    if detected:
+        return detected
+    if _page_has_configured_auth_markers(page, action):
+        return "AUTH_EXPIRED"
+    if _page_has_configured_error_markers(page, action):
+        return "PAGE_ERROR"
+    return None
+
+
+def _reload_page(page: Any, *, timeout_ms: int) -> None:
+    reload_method = getattr(page, "reload", None)
+    if callable(reload_method):
+        reload_method(wait_until="load", timeout=timeout_ms)
+
+
+def _ensure_page_ready(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    params: dict[str, Any],
+    extracted: dict[str, Any],
+    timeout_ms: int,
+    run_config: PlaywrightRunConfig | None = None,
+    sync_job_id: str = "",
+    handoff_coordinator: RemoteControlCoordinator | None = None,
+    backend_factory: Any = None,
+    handoff_event_loop: Any = None,
+    chrome: Any = None,
+) -> dict[str, Any]:
+    target_url = _resolve_action_url(action, key="target_url", params=params, extracted=extracted)
+    selectors = _ready_selectors(action)
+    if not target_url or not selectors:
+        raise BrowserActionError(
+            "PAGE_CHANGED",
+            "ensure_page_ready requires target_url and ready_selector/ready_selectors",
+        )
+
+    check_timeout_ms = int(action.get("ready_check_timeout_ms") or 1000)
+    if _page_has_ready_selector(page, selectors, timeout_ms=check_timeout_ms):
+        return {}
+
+    attempts = max(1, int(action.get("recover_attempts") or 1))
+    wait_after_navigation_ms = max(0, int(action.get("wait_after_navigation_ms") or 0))
+    reload_first = action.get("reload_first")
+    allow_auth = bool(action.get("allow_auth_redirect"))
+    last_state: str | None = _configured_page_state(page, action)
+    last_error: Exception | None = None
+
+    for attempt in range(attempts):
+        current_state = _configured_page_state(page, action)
+        if current_state == "RISK_VERIFICATION":
+            current_state = _await_navigate_risk_clearance(
+                page,
+                run_config=run_config,
+                sync_job_id=sync_job_id,
+                handoff_coordinator=handoff_coordinator,
+                backend_factory=backend_factory,
+                handoff_event_loop=handoff_event_loop,
+                chrome=chrome,
+            )
+        last_state = current_state or last_state
+        should_reload = reload_first is True or (
+            reload_first is not False and current_state in {"PAGE_ERROR", "AUTH_EXPIRED"}
+        )
+        if should_reload:
+            try:
+                _reload_page(page, timeout_ms=timeout_ms)
+                if wait_after_navigation_ms:
+                    _wait_for_timeout(page, wait_after_navigation_ms)
+                if _page_has_ready_selector(page, selectors, timeout_ms=check_timeout_ms):
+                    return {}
+            except Exception as exc:
+                last_error = exc
+
+        try:
+            page.goto(target_url, wait_until="load", timeout=timeout_ms)
+            if wait_after_navigation_ms:
+                _wait_for_timeout(page, wait_after_navigation_ms)
+            if _page_has_ready_selector(page, selectors, timeout_ms=check_timeout_ms):
+                return {}
+        except Exception as exc:
+            last_error = exc
+
+        last_state = _configured_page_state(page, action) or last_state
+        logger.info(
+            "browser ensure_page_ready retry: step_id=%s attempt=%s/%s state=%s url=%s",
+            action.get("id") or "",
+            attempt + 1,
+            attempts,
+            last_state or "not_ready",
+            _page_url(page),
+        )
+
+    if last_state == "AUTH_EXPIRED" and allow_auth:
+        return {"auth_required": True}
+    if last_state in {"AUTH_EXPIRED", "RISK_VERIFICATION"}:
+        raise BrowserActionError(last_state, f"ensure_page_ready detected {last_state}: url={_page_url(page)}")
+    raise BrowserActionError(
+        "PAGE_CHANGED",
+        f"ensure_page_ready selector not found after recovery: url={_page_url(page)} error={last_error}",
+    )
+
+
 def _render_template(value: str, *, params: dict[str, Any], extracted: dict[str, Any]) -> str:
     text = str(value or "")
     if "{{" not in text:
@@ -443,6 +628,20 @@ def _execute_action(
     if name == "fill":
         page.fill(selector, _resolve_value(action, params, extracted), timeout=timeout_ms)
         return {}
+    if name == "ensure_page_ready":
+        return _ensure_page_ready(
+            page,
+            action,
+            params=params,
+            extracted=extracted,
+            timeout_ms=timeout_ms,
+            run_config=run_config,
+            sync_job_id=sync_job_id,
+            handoff_coordinator=handoff_coordinator,
+            backend_factory=backend_factory,
+            handoff_event_loop=handoff_event_loop,
+            chrome=chrome,
+        )
     if name == "set_date":
         _set_date_value(
             page,
@@ -471,6 +670,21 @@ def _execute_action(
         page.wait_for_timeout(duration_ms)
         return {}
     if name in {"login", "login_if_needed"}:
+        post_login_selector = str(action.get("post_login_wait_selector") or "").strip()
+        if name == "login_if_needed" and post_login_selector:
+            check_timeout_ms = min(timeout_ms, int(action.get("already_logged_in_timeout_ms") or 2000))
+            if _page_has_ready_selector(
+                page,
+                _string_items(post_login_selector),
+                timeout_ms=check_timeout_ms,
+            ):
+                logger.info(
+                    "browser login_if_needed skipped because post-login selector is already ready: "
+                    "step_id=%s url=%s",
+                    step_id or "<unnamed>",
+                    _page_url(page),
+                )
+                return {}
         _execute_login_action(
             page,
             action,
@@ -652,7 +866,10 @@ def _execute_login_action(
         chrome=chrome,
     )
     post_login_wait_selector = str(action.get("post_login_wait_selector") or "").strip()
-    if post_login_wait_selector:
+    wait_for_post_login_selector = action.get("wait_for_post_login_selector")
+    if wait_for_post_login_selector is None:
+        wait_for_post_login_selector = True
+    if post_login_wait_selector and bool(wait_for_post_login_selector):
         _wait_for_post_login_selector(
             page,
             login_context=login_context,
