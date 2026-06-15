@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from finance_browser_agent import data_agent_ws as data_agent_ws_module
 from finance_browser_agent.data_agent_ws import DataAgentWsClient
 from finance_browser_agent import dispatcher_loop as dl_module
 from finance_browser_agent.dispatcher_loop import BrowserDispatcherLoop
@@ -344,6 +345,128 @@ async def test_ws_request_retries_idempotent_completion_after_disconnect() -> No
     assert result == {"success": True, "sync_job_id": "sync-001"}
     assert [msg["type"] for msg in created_sockets[0].sent] == ["hello", "job_complete"]
     assert [msg["type"] for msg in created_sockets[1].sent] == ["hello", "job_complete"]
+
+
+async def test_ws_request_retries_idempotent_completion_after_transient_server_error() -> None:
+    class _TransientErrorWs(_FakeWs):
+        def __init__(self, *, transient_failures: int = 1) -> None:
+            super().__init__()
+            self.transient_failures = transient_failures
+
+        async def send(self, raw: str) -> None:
+            msg = json.loads(raw)
+            self.sent.append(msg)
+            msg_type = str(msg.get("type") or "")
+            if msg_type == "hello":
+                return
+            if len([sent for sent in self.sent if sent.get("type") == msg_type]) <= self.transient_failures:
+                await self._queue.put(
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "id": msg.get("id"),
+                            "ok": False,
+                            "error": "无法建立 MCP SSE 连接",
+                        }
+                    )
+                )
+                return
+            await self._queue.put(
+                json.dumps(
+                    {
+                        "type": "result",
+                        "id": msg.get("id"),
+                        "ok": True,
+                        "data": {"success": True, "sync_job_id": msg.get("sync_job_id")},
+                    }
+                )
+            )
+
+    socket = _TransientErrorWs()
+
+    async def connector(_url: str) -> _TransientErrorWs:
+        return socket
+
+    client = DataAgentWsClient(
+        ws_url="ws://data-agent/browser-agent",
+        agent_id="agent-1",
+        max_concurrency=1,
+        token_provider=lambda: "token",
+        connector=connector,
+    )
+
+    result = await client.request(
+        "job_complete",
+        {"sync_job_id": "sync-002"},
+        retry_on_disconnect=True,
+    )
+
+    assert result == {"success": True, "sync_job_id": "sync-002"}
+    assert [msg["type"] for msg in socket.sent] == ["hello", "job_complete", "job_complete"]
+
+
+async def test_ws_request_keeps_retrying_idempotent_completion_through_restart_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(data_agent_ws_module, "_RETRY_BACKOFF_SECONDS", (0.0, 0.0, 0.0))
+
+    class _RestartWindowWs(_FakeWs):
+        async def send(self, raw: str) -> None:
+            msg = json.loads(raw)
+            self.sent.append(msg)
+            msg_type = str(msg.get("type") or "")
+            if msg_type == "hello":
+                return
+            if len([sent for sent in self.sent if sent.get("type") == msg_type]) <= 3:
+                await self._queue.put(
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "id": msg.get("id"),
+                            "ok": False,
+                            "error": "server rejected WebSocket connection: HTTP 502",
+                        }
+                    )
+                )
+                return
+            await self._queue.put(
+                json.dumps(
+                    {
+                        "type": "result",
+                        "id": msg.get("id"),
+                        "ok": True,
+                        "data": {"success": True, "sync_job_id": msg.get("sync_job_id")},
+                    }
+                )
+            )
+
+    socket = _RestartWindowWs()
+
+    async def connector(_url: str) -> _RestartWindowWs:
+        return socket
+
+    client = DataAgentWsClient(
+        ws_url="ws://data-agent/browser-agent",
+        agent_id="agent-1",
+        max_concurrency=1,
+        token_provider=lambda: "token",
+        connector=connector,
+    )
+
+    result = await client.request(
+        "job_complete",
+        {"sync_job_id": "sync-003"},
+        retry_on_disconnect=True,
+    )
+
+    assert result == {"success": True, "sync_job_id": "sync-003"}
+    assert [msg["type"] for msg in socket.sent] == [
+        "hello",
+        "job_complete",
+        "job_complete",
+        "job_complete",
+        "job_complete",
+    ]
 
 
 async def test_tally_client_marks_terminal_updates_as_disconnect_retryable() -> None:

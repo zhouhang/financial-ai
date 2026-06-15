@@ -25,6 +25,7 @@ from mcp_client import (
     execution_scheduler_list_run_plans,
     recon_queue_fail_expired_waiting,
     recon_queue_fail_failed_collection_waiting,
+    recon_queue_reclaim_stale,
     recon_queue_requeue_ready_waiting,
 )
 
@@ -392,6 +393,7 @@ class FinanceCronSchedulerService:
                 token, stale_after_seconds=self.config.reaper_stale_after_seconds)),
             ("fail_failed", lambda: recon_queue_fail_failed_collection_waiting(token)),
             ("requeue_ready", lambda: recon_queue_requeue_ready_waiting(token)),
+            ("reclaim_stale_recon", lambda: recon_queue_reclaim_stale(token, timeout_minutes=15)),
             ("fail_expired", lambda: recon_queue_fail_expired_waiting(token)),
         )
         for label, call in steps:

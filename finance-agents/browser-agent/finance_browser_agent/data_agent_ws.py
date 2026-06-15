@@ -18,7 +18,25 @@ logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT = 120.0
 _CONNECT_TIMEOUT = 10.0
+_RETRY_BACKOFF_SECONDS = (1.0, 3.0, 8.0)
 EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _is_transient_result_error(error: str) -> bool:
+    text = str(error or "").lower()
+    if not text:
+        return False
+    markers = (
+        "无法建立 mcp sse",
+        "等待 mcp 响应超时",
+        "mcp 调用异常",
+        "http 502",
+        "http 503",
+        "bad gateway",
+        "service restart",
+        "server rejected websocket connection",
+    )
+    return any(marker in text for marker in markers)
 
 
 async def _default_connector(url: str):
@@ -112,7 +130,7 @@ class DataAgentWsClient:
         *,
         retry_on_disconnect: bool = False,
     ) -> dict[str, Any]:
-        max_attempts = 2 if retry_on_disconnect else 1
+        max_attempts = 1 + len(_RETRY_BACKOFF_SECONDS) if retry_on_disconnect else 1
         last_error = ""
         for attempt_index in range(max_attempts):
             if self._ws is None or (self._reader_task and self._reader_task.done()):
@@ -142,11 +160,17 @@ class DataAgentWsClient:
                 last_error = f"data-agent WS 发送失败: {exc}"
                 await self._close()
                 if attempt_index + 1 < max_attempts:
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS[attempt_index])
                     logger.warning("data-agent WS 请求断开，准备重连重试: type=%s error=%s", msg_type, exc)
                     continue
                 return {"success": False, "error": last_error}
             if not result.get("ok"):
-                return {"success": False, "error": str(result.get("error") or "data-agent 返回失败")}
+                error = str(result.get("error") or "data-agent 返回失败")
+                if retry_on_disconnect and _is_transient_result_error(error) and attempt_index + 1 < max_attempts:
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS[attempt_index])
+                    logger.warning("data-agent WS 请求返回瞬时失败，准备重试: type=%s error=%s", msg_type, error)
+                    continue
+                return {"success": False, "error": error}
             data = result.get("data")
             return data if isinstance(data, dict) else {"success": True, "data": data}
         return {"success": False, "error": last_error or "data-agent WS 请求失败"}

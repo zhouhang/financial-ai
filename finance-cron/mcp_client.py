@@ -334,6 +334,13 @@ async def recon_queue_requeue_ready_waiting(worker_token: str) -> dict[str, Any]
     )
 
 
+async def recon_queue_reclaim_stale(worker_token: str, timeout_minutes: int = 15) -> dict[str, Any]:
+    return await call_mcp_tool(
+        "recon_queue_reclaim_stale",
+        {"worker_token": worker_token, "timeout_minutes": timeout_minutes},
+    )
+
+
 async def recon_queue_fail_expired_waiting(worker_token: str) -> dict[str, Any]:
     return await call_mcp_tool(
         "recon_queue_fail_expired_waiting", {"worker_token": worker_token}
