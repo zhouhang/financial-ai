@@ -105,36 +105,51 @@ class DataAgentWsClient:
         finally:
             await self._close()
 
-    async def request(self, msg_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._ws is None or (self._reader_task and self._reader_task.done()):
-            if not await self.connect():
-                return {"success": False, "error": "无法建立 data-agent WS 连接"}
-        req_id = str(uuid.uuid4())
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._pending[req_id] = fut
-        try:
-            await self._ws.send(
-                json.dumps(
-                    {"type": msg_type, "id": req_id, **payload},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+    async def request(
+        self,
+        msg_type: str,
+        payload: dict[str, Any],
+        *,
+        retry_on_disconnect: bool = False,
+    ) -> dict[str, Any]:
+        max_attempts = 2 if retry_on_disconnect else 1
+        last_error = ""
+        for attempt_index in range(max_attempts):
+            if self._ws is None or (self._reader_task and self._reader_task.done()):
+                if not await self.connect():
+                    return {"success": False, "error": "无法建立 data-agent WS 连接"}
+            req_id = str(uuid.uuid4())
+            fut: asyncio.Future = asyncio.get_event_loop().create_future()
+            self._pending[req_id] = fut
+            try:
+                await self._ws.send(
+                    json.dumps(
+                        {"type": msg_type, "id": req_id, **payload},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
                 )
-            )
-            result = await asyncio.wait_for(fut, timeout=_REQUEST_TIMEOUT)
-        except asyncio.TimeoutError:
-            self._pending.pop(req_id, None)
-            # 超时往往意味着连接已半开(没收到关闭帧、ping 超时又被中间代理掩盖),
-            # reader 仍阻塞、ws 仍在。必须主动销毁连接,否则下次 request 会复用死连接、
-            # 永不重连(生产里 win-1 因此卡约 11 分钟才恢复心跳)。
-            await self._close()
-            return {"success": False, "error": "等待 data-agent 响应超时"}
-        except Exception as exc:  # noqa: BLE001
-            self._pending.pop(req_id, None)
-            return {"success": False, "error": f"data-agent WS 发送失败: {exc}"}
-        if not result.get("ok"):
-            return {"success": False, "error": str(result.get("error") or "data-agent 返回失败")}
-        data = result.get("data")
-        return data if isinstance(data, dict) else {"success": True, "data": data}
+                result = await asyncio.wait_for(fut, timeout=_REQUEST_TIMEOUT)
+            except asyncio.TimeoutError:
+                self._pending.pop(req_id, None)
+                # 超时往往意味着连接已半开(没收到关闭帧、ping 超时又被中间代理掩盖),
+                # reader 仍阻塞、ws 仍在。必须主动销毁连接,否则下次 request 会复用死连接、
+                # 永不重连(生产里 win-1 因此卡约 11 分钟才恢复心跳)。
+                await self._close()
+                return {"success": False, "error": "等待 data-agent 响应超时"}
+            except Exception as exc:  # noqa: BLE001
+                self._pending.pop(req_id, None)
+                last_error = f"data-agent WS 发送失败: {exc}"
+                await self._close()
+                if attempt_index + 1 < max_attempts:
+                    logger.warning("data-agent WS 请求断开，准备重连重试: type=%s error=%s", msg_type, exc)
+                    continue
+                return {"success": False, "error": last_error}
+            if not result.get("ok"):
+                return {"success": False, "error": str(result.get("error") or "data-agent 返回失败")}
+            data = result.get("data")
+            return data if isinstance(data, dict) else {"success": True, "data": data}
+        return {"success": False, "error": last_error or "data-agent WS 请求失败"}
 
     async def send_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._ws is None or (self._reader_task and self._reader_task.done()):
