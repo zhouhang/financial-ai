@@ -10422,6 +10422,39 @@ async def _handle_browser_sync_job_claim(arguments: dict[str, Any]) -> dict[str,
         agent_id=agent_id,
         agent_max_concurrency=max_concurrency,
     )
+    if job and not _normalize_bool((job or {}).get("is_verification"), default=False):
+        request_payload = job.get("request_payload") if isinstance(job, dict) else {}
+        request_payload = request_payload if isinstance(request_payload, dict) else {}
+        nested_params = request_payload.get("params") if isinstance(request_payload.get("params"), dict) else {}
+        dataset_id = _safe_text(nested_params.get("dataset_id") or request_payload.get("dataset_id"))
+        biz_date = _safe_text(nested_params.get("biz_date") or request_payload.get("biz_date"))
+        reusable_job = None
+        if dataset_id and biz_date:
+            reusable_job = _find_reusable_browser_success_job(
+                company_id=_safe_text(job.get("company_id")),
+                data_source_id=_safe_text(job.get("data_source_id")),
+                dataset_id=dataset_id,
+                resource_key=_safe_text(job.get("resource_key")),
+                biz_date=biz_date,
+            )
+        reusable_job_id = _safe_text((reusable_job or {}).get("id"))
+        if reusable_job_id and reusable_job_id != _safe_text(job.get("id")):
+            completed_job = auth_db.mark_browser_sync_job_success(
+                sync_job_id=_safe_text(job.get("id")),
+                summary={
+                    "skipped": True,
+                    "reuse_reason": "browser_records_exist",
+                    "reused_sync_job_id": reusable_job_id,
+                },
+                allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
+            )
+            if completed_job:
+                return {
+                    "success": True,
+                    "job": None,
+                    "auto_completed": True,
+                    "completed_job": _attach_aliases_to_job(completed_job),
+                }
     return {"success": True, "job": job}
 
 
