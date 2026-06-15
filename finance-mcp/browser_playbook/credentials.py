@@ -2,14 +2,71 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 import psycopg2.extras
 
 from auth import db as auth_db
 
 logger = logging.getLogger(__name__)
+
+
+def registrable_domain(host: str) -> str:
+    """Best-effort eTLD+1 of a host, so SSO sibling subdomains map to one login identity.
+
+    e.g. mms.pinduoduo.com & cashier.pinduoduo.com -> pinduoduo.com (PDD orders live on mms,
+    bills on cashier, but share one SSO login); myseller.taobao.com -> taobao.com. Handles the
+    common ``*.com.cn`` compound suffix; not a full public-suffix list, which is overkill for
+    the platforms we collect from.
+    """
+    labels = [p for p in str(host or "").lower().split(".") if p]
+    if len(labels) <= 2:
+        return ".".join(labels)
+    compound_slds = {"com", "net", "org", "gov", "edu"}
+    if labels[-1] == "cn" and labels[-2] in compound_slds and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def browser_login_profile_ref(*, playbook_body: dict[str, Any], username: str) -> str:
+    """Derive a stable per-login profile ref = (login domain + username).
+
+    Browser collection shares one persistent Chrome profile per *login identity* (same account
+    on the same platform), so datasets authenticating as the same account reuse one session
+    instead of each logging in. Keyed on:
+      - the *registrable domain* of the first step URL — NOT the full host (PDD orders are on
+        mms.pinduoduo.com, bills on cashier.pinduoduo.com but share one SSO login -> both must
+        resolve to pinduoduo.com), and NOT the data-page path (differs per dataset);
+      - the *username* — NOT the full credential_ref, which is enc(username+password) and
+        rotates when the password changes (rotation would orphan the profile -> relogin).
+    Returns "" when either part is missing (caller leaves runtime_profile_ref blank -> runner
+    falls back to shop_id).
+    """
+    user = str(username or "").strip()
+    if not user:
+        return ""
+    steps = playbook_body.get("steps") or playbook_body.get("actions") or []
+    domain = ""
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        url = str(
+            step.get("url")
+            or step.get("target_url")
+            or (step.get("params") or {}).get("url")
+            or ""
+        ).strip()
+        if url:
+            domain = registrable_domain(urlparse(url).netloc)
+            if domain:
+                break
+    if not domain:
+        return ""
+    digest = hashlib.sha1(f"{domain}|{user}".encode("utf-8")).hexdigest()[:16]
+    return f"login::{domain}::{digest}"
 
 
 def update_browser_playbook_credential(
@@ -38,6 +95,28 @@ def update_browser_playbook_credential(
     try:
         with conn_manager as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Derive the per-login profile ref from (playbook login domain + username) so that
+                # tasks sharing one account (same username on the same platform) collapse onto one
+                # Chrome profile/session. Computed here because this is the first point the username
+                # is known. Only filled when runtime_profile_ref is currently empty, so legacy
+                # hand-aligned bindings keep their existing value.
+                cur.execute(
+                    """
+                    SELECT p.playbook_body
+                    FROM shop_runtime_bindings srb
+                    JOIN playbooks p
+                      ON p.company_id = srb.company_id AND p.playbook_id = srb.playbook_id
+                    WHERE srb.company_id = %s AND srb.data_source_id = %s
+                    ORDER BY (p.status = 'active') DESC, p.version DESC
+                    LIMIT 1
+                    """,
+                    (company_id, data_source_id),
+                )
+                pb_row = cur.fetchone()
+                playbook_body = dict((pb_row or {}).get("playbook_body") or {})
+                computed_profile_ref = browser_login_profile_ref(
+                    playbook_body=playbook_body, username=username
+                )
                 cur.execute(
                     """
                     UPDATE shop_runtime_bindings
@@ -45,14 +124,18 @@ def update_browser_playbook_credential(
                         profile_status = 'verifying',
                         playbook_status = 'ok',
                         cron_pause_reason = NULL,
+                        runtime_profile_ref = CASE
+                            WHEN COALESCE(runtime_profile_ref, '') = '' THEN %s
+                            ELSE runtime_profile_ref
+                        END,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE company_id = %s
                       AND data_source_id = %s
                     RETURNING id, company_id, data_source_id, shop_id, playbook_id,
                               agent_id, egress_group, profile_status, playbook_status,
-                              cron_pause_reason, last_collection_at, updated_at
+                              cron_pause_reason, last_collection_at, updated_at, runtime_profile_ref
                     """,
-                    (credential_ref, company_id, data_source_id),
+                    (credential_ref, computed_profile_ref, company_id, data_source_id),
                 )
                 row = cur.fetchone()
                 conn.commit()

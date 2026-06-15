@@ -5799,15 +5799,20 @@ def guard_browser_sync_job_worker_active(
         return None
 
 
-def cancel_open_handoff_sessions_for_sync_job(*, sync_job_id: str, reason: str = "") -> int:
-    """Cancel non-final handoff sessions for a manually cleared sync job."""
+def cancel_open_handoff_sessions_for_sync_job(
+    *,
+    sync_job_id: str,
+    reason: str = "",
+    event_type: str = "manual_clear",
+) -> int:
+    """Cancel non-final handoff sessions for a sync job that can no longer be controlled."""
     event = _handoff_audit_event(
-        event_type="manual_clear",
+        event_type=str(event_type or "manual_clear"),
         reason=str(reason or "operator cleared stuck browser task"),
         metadata={"status": "cancelled"},
     )
-    conn_manager = get_conn()
     try:
+        conn_manager = get_conn()
         with conn_manager as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -5996,6 +6001,7 @@ def find_success_dataset_collection_sync_job(
                       AND data_source_id = %s
                       AND resource_key = %s
                       AND job_status = 'success'
+                      AND COALESCE(is_verification, FALSE) IS FALSE
                       AND request_payload ->> 'dataset_id' = %s
                       AND request_payload ->> 'biz_date' = %s
                     ORDER BY completed_at DESC NULLS LAST, updated_at DESC, created_at DESC

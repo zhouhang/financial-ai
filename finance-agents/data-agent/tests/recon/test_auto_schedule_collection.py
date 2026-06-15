@@ -294,6 +294,85 @@ def test_check_dataset_ready_collection_failure_blocks_stale_records(monkeypatch
     assert recon_ctx["missing_bindings"][0]["error"] == "先同步失败：upstream timeout"
 
 
+def test_check_dataset_ready_rerun_queues_browser_verification_when_binding_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_collect(auth_token: str, source_id: str, **kwargs: object) -> dict[str, object]:
+        calls.append(("collect", {"auth_token": auth_token, "source_id": source_id, **kwargs}))
+        return {
+            "success": False,
+            "queued": False,
+            "failure_type": "browser_binding_unavailable",
+            "collection_driver": "browser_playbook_remote",
+            "error_code": "RISK_VERIFICATION",
+            "error": "浏览器采集店铺状态不可用: profile_status=risk_blocked",
+        }
+
+    async def fake_retry_verification(
+        auth_token: str,
+        source_id: str,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        calls.append(("retry_verification", {"auth_token": auth_token, "source_id": source_id, **kwargs}))
+        return {
+            "success": True,
+            "status": "verification_pending",
+            "verification_sync_job_id": "verification-job-001",
+            "verification_biz_date": "2026-04-25",
+            "message": "浏览器任务已重新下发到采集机，请等待任务状态更新",
+        }
+
+    async def stale_list(auth_token: str, source_id: str, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("browser unavailable rerun must not read stale records")
+
+    monkeypatch.setattr(nodes, "data_source_trigger_dataset_collection", fake_collect)
+    monkeypatch.setattr(nodes, "data_source_retry_browser_playbook_verification", fake_retry_verification)
+    monkeypatch.setattr(nodes, "data_source_list_collection_records", stale_list)
+
+    state = {
+        "auth_token": "token",
+        "recon_ctx": {
+            "biz_date": "2026-04-25",
+            "run_context": {"trigger_type": "rerun"},
+            "plan_input_bindings": [
+                {
+                    "data_source_id": "source-browser",
+                    "dataset_id": "dataset-browser",
+                    "table_name": "browser_orders_ready",
+                    "resource_key": "browser_orders",
+                    "required": True,
+                    "collection_driver": "browser_playbook_remote",
+                    "dataset_source_type": "browser_collection_records",
+                }
+            ],
+        },
+    }
+
+    ready_result = asyncio.run(nodes.check_dataset_ready_node(state))
+    validated_result = nodes.validate_dataset_completeness_node(ready_result)
+    recon_ctx = validated_result["recon_ctx"]
+
+    assert [item[0] for item in calls] == ["collect", "retry_verification"]
+    assert calls[0][1]["trigger_mode"] == "retry"
+    assert calls[1][1]["verification_biz_date"] == "2026-04-25"
+    assert calls[1][1]["dataset_id"] == "dataset-browser"
+    assert recon_ctx["waiting_data"] is True
+    assert recon_ctx["failed_stage"] == "data_waiting"
+    assert recon_ctx["waiting_datasets"] == [
+        {
+            "data_source_id": "source-browser",
+            "dataset_id": "dataset-browser",
+            "resource_key": "browser_orders",
+            "biz_date": "2026-04-25",
+        }
+    ]
+    assert recon_ctx["collection_job_ids"] == ["verification-job-001"]
+    assert recon_ctx["missing_bindings"][0]["collection_job_id"] == "verification-job-001"
+    assert "浏览器采集店铺状态不可用" not in recon_ctx["failed_reason"]
+
+
 def test_check_dataset_ready_skips_keyset_lookup_collection(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 

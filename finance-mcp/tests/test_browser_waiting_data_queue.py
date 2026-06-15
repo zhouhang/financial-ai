@@ -109,3 +109,19 @@ def test_fail_waiting_recon_runs_with_failed_browser_jobs_uses_collection_job_id
     assert "s.error_message" in sql
     assert "UPDATE execution_runs" in sql
     assert "failed_stage = 'data_waiting'" in sql
+
+
+def test_success_collection_job_lookup_excludes_verification_jobs(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+
+    auth_db.find_success_dataset_collection_sync_job(
+        company_id="company-001",
+        data_source_id="source-001",
+        dataset_id="dataset-001",
+        resource_key="browser-orders",
+        biz_date="2026-06-15",
+    )
+
+    sql = "\n".join(cursor.sql)
+    assert "COALESCE(is_verification, FALSE) IS FALSE" in sql

@@ -12,6 +12,7 @@ ActionType = Literal[
     "click",
     "fill",
     "set_date",
+    "set_range_calendar_day",
     "wait_for",
     "wait_ms",
     "extract_text",
@@ -22,6 +23,7 @@ ActionType = Literal[
     "download_history_file",
     "download_qianniu_export_report",
     "parse_table",
+    "paginate_capture_json",
     "assert",
 ]
 ColumnType = Literal["string", "date", "decimal", "integer", "boolean"]
@@ -66,6 +68,23 @@ class PlaybookStep(BaseModel):
     mapping: dict[str, str] | None = None
     source: str | None = None
     format: Literal["csv", "xlsx"] | None = None
+    skip_rows: int | None = None
+    archive: Literal["zip"] | None = None
+    drop_row_prefix: str | None = None
+    header_selector: str | None = None
+    day_cell_selector: str | None = None
+    out_of_month_marker: str | None = None
+    prev_month_selector: str | None = None
+    next_month_selector: str | None = None
+    confirm_selector: str | None = None
+    capture_url_contains: str | None = None
+    results_path: str | None = None
+    total_path: str | None = None
+    field_map: dict[str, str] | None = None
+    next_selector: str | None = None
+    trigger_selector: str | None = None
+    max_pages: int | None = None
+    page_wait_ms: int | None = None
     download_timeout_ms: int | None = None
     history_row_selector: str | None = None
     history_row_selectors: list[str] | None = None
@@ -128,6 +147,7 @@ class PlaybookStep(BaseModel):
             "click",
             "fill",
             "set_date",
+            "set_range_calendar_day",
             "wait_for",
             "extract_text",
             "download",
@@ -148,6 +168,12 @@ class PlaybookStep(BaseModel):
             has_biz_date_value = "{{params.biz_date}}" in str(self.value or "")
             if self.value_from != "params.biz_date" and not has_biz_date_value:
                 raise ValueError("set_date must use value_from=params.biz_date or value with {{params.biz_date}}")
+        if self.action == "set_range_calendar_day":
+            has_biz_date_value = "{{params.biz_date}}" in str(self.value or "")
+            if self.value_from != "params.biz_date" and not has_biz_date_value:
+                raise ValueError(
+                    "set_range_calendar_day must use value_from=params.biz_date or value with {{params.biz_date}}"
+                )
         if self.action == "download_history_file" and self.value_from != "params.biz_date":
             raise ValueError("download_history_file must use value_from=params.biz_date")
         if self.action == "download_qianniu_export_report":

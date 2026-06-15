@@ -153,14 +153,9 @@ function defaultCredentialUsername(title: string): string {
   return shopName ? `${shopName}:ai财务` : '';
 }
 
-function browserTaskGroupKey(title: string): string {
-  return title.replace(/-(店铺订单|收支明细|收支账单)$/, '').trim() || title;
-}
-
-function browserTaskKindOrder(title: string): number {
-  if (/-店铺订单$/.test(title)) return 0;
-  if (/-(收支明细|收支账单)$/.test(title)) return 1;
-  return 2;
+function createdAtRank(value: unknown): number {
+  const parsed = Date.parse(text(value));
+  return Number.isNaN(parsed) ? -Infinity : parsed;
 }
 
 function statusLabel(status: string): string {
@@ -305,13 +300,9 @@ export function BrowserPlaybookPanel({
         }));
 
       browserSources.sort((left, right) => {
-        const leftGroup = browserTaskGroupKey(left.title);
-        const rightGroup = browserTaskGroupKey(right.title);
-        const groupCompare = leftGroup.localeCompare(rightGroup, 'zh-CN');
-        if (groupCompare !== 0) return groupCompare;
-
-        const kindCompare = browserTaskKindOrder(left.title) - browserTaskKindOrder(right.title);
-        if (kindCompare !== 0) return kindCompare;
+        const leftRank = createdAtRank(left.source.created_at);
+        const rightRank = createdAtRank(right.source.created_at);
+        if (leftRank !== rightRank) return rightRank - leftRank;
 
         return left.index - right.index;
       });

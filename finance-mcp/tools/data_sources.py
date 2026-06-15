@@ -35,7 +35,11 @@ from app_config import SERVICE_PROVIDER_COMPANY_ID
 from auth import db as auth_db
 from auth.jwt_utils import get_user_from_token
 from browser_playbook import assignment as browser_assignment
-from browser_playbook.credentials import update_browser_playbook_credential
+from browser_playbook.credentials import (
+    browser_login_profile_ref as _browser_login_profile_ref,
+    registrable_domain as _registrable_domain,
+    update_browser_playbook_credential,
+)
 from connectors.factory import build_connector
 from platforms.base import PlatformAppConfig, PlatformTokenBundle
 from platforms.factory import build_connector as build_platform_connector
@@ -118,6 +122,7 @@ VALID_BROWSER_PLAYBOOK_ACTIONS = {
     "click",
     "fill",
     "set_date",
+    "set_range_calendar_day",
     "wait_for",
     "wait_ms",
     "extract_text",
@@ -128,6 +133,7 @@ VALID_BROWSER_PLAYBOOK_ACTIONS = {
     "download_history_file",
     "download_qianniu_export_report",
     "parse_table",
+    "paginate_capture_json",
     "assert",
 }
 PUBLISH_STATUS_VALUES = {"published", "unpublished", "draft", "archived"}
@@ -1943,6 +1949,37 @@ def _browser_binding_unavailable_result(binding: dict[str, Any]) -> dict[str, An
     }
 
 
+def _auto_finalize_browser_verification_job(
+    *,
+    company_id: str,
+    data_source_id: str,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    if not bool(job.get("is_verification")):
+        return {}
+    request_payload = job.get("request_payload") or {}
+    payload = request_payload if isinstance(request_payload, dict) else {}
+    playbook_id = _safe_text(payload.get("playbook_id"))
+    version = _safe_text(payload.get("playbook_version"))
+    if not playbook_id or not version:
+        return {
+            "success": False,
+            "error": "verification sync_job 缺少 playbook 标识",
+        }
+    result = auth_db.activate_browser_playbook_and_binding(
+        company_id=company_id,
+        playbook_id=playbook_id,
+        version=version,
+        data_source_id=data_source_id,
+    )
+    success = bool(result.get("playbook")) and bool(result.get("binding"))
+    return {
+        "success": success,
+        "error": "" if success else "激活失败:playbook 或 binding 不在 draft/verifying 状态",
+        **result,
+    }
+
+
 def _require_user(auth_token: str) -> dict[str, Any]:
     token = str(auth_token or "").strip()
     if not token:
@@ -2424,46 +2461,6 @@ def _browser_registration_slug(title: Any) -> str:
             previous_dash = True
     slug = "".join(slug_chars).strip("-")
     return slug or "browser-collection"
-
-
-def _browser_login_profile_ref(*, playbook_body: dict[str, Any], username: str) -> str:
-    """Derive a stable per-login profile ref = (login host + username).
-
-    Browser collection shares one persistent Chrome profile per *login identity* (same
-    account on the same site). A shop's multiple datasets (e.g. orders + bills) that
-    authenticate with the same username therefore reuse one session instead of each
-    logging in separately. Keyed on:
-      - the login *host* (netloc of the first step URL) — NOT the full data-page URL,
-        which differs per dataset (orders vs bills) and would split the shared profile;
-      - the *username* — NOT the full credential_ref, which is enc(username+password) and
-        rotates when the password changes (rotation would orphan the profile -> relogin).
-    Returns "" when either part is missing; the caller then leaves runtime_profile_ref
-    blank and the runner falls back to shop_id (legacy per-dataset profile), so existing
-    behaviour is preserved.
-    """
-    user = str(username or "").strip()
-    if not user:
-        return ""
-    steps = playbook_body.get("steps") or playbook_body.get("actions") or []
-    host = ""
-    for step in steps:
-        if not isinstance(step, dict):
-            continue
-        url = str(
-            step.get("url")
-            or step.get("target_url")
-            or (step.get("params") or {}).get("url")
-            or ""
-        ).strip()
-        if url:
-            parsed_host = urlparse(url).netloc.lower()
-            if parsed_host:
-                host = parsed_host
-                break
-    if not host:
-        return ""
-    digest = hashlib.sha1(f"{host}|{user}".encode("utf-8")).hexdigest()[:16]
-    return f"login::{host}::{digest}"
 
 
 def _browser_registration_code(*, title: str) -> str:
@@ -10619,7 +10616,20 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
                 last_sync_at=(row or {}).get("completed_at") or _now_iso(),
                 last_error_message="",
             )
-        return {"success": True, "job": row, "summary": final_summary}
+        auth_db.cancel_open_handoff_sessions_for_sync_job(
+            sync_job_id=sync_job_id,
+            reason="browser job completed",
+            event_type="job_completed",
+        )
+        response = {"success": True, "job": row, "summary": final_summary}
+        auto_finalize = _auto_finalize_browser_verification_job(
+            company_id=company_id,
+            data_source_id=data_source_id,
+            job=row,
+        )
+        if auto_finalize:
+            response["auto_finalize"] = auto_finalize
+        return response
 
 
 async def _handle_browser_sync_job_fail(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -10663,6 +10673,11 @@ async def _handle_browser_sync_job_fail(arguments: dict[str, Any]) -> dict[str, 
             "job": _attach_aliases_to_job(latest_job),
             "message": f"browser sync_job already left active state: {latest_status or 'unknown'}",
         }
+    auth_db.cancel_open_handoff_sessions_for_sync_job(
+        sync_job_id=sync_job_id,
+        reason=f"browser job failed: {fail_reason}",
+        event_type="job_failed",
+    )
     return {"success": True, "job": row}
 
 

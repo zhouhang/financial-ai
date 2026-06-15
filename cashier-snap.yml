@@ -1,0 +1,305 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - img [ref=e6] [cursor=pointer]
+    - generic [ref=e7]: 资金中心对账中心发票管理银行卡管理
+    - generic [ref=e8]:
+      - generic [ref=e9] [cursor=pointer]:
+        - generic [ref=e10]: 
+        - text: 返回商家后台
+      - generic [ref=e12]:
+        - generic [ref=e13]:
+          - img [ref=e14]
+          - generic "博宽充值专营店" [ref=e15]
+          - img [ref=e17]:
+            - img [ref=e18]
+        - generic:
+          - generic:
+            - generic: 退出
+  - generic [ref=e21]:
+    - generic [ref=e23]:
+      - generic [ref=e25]: 对账中心
+      - generic [ref=e30]:
+        - generic [ref=e33] [cursor=pointer]: 货款账户
+        - generic [ref=e36] [cursor=pointer]: 营销账户
+        - generic [ref=e39] [cursor=pointer]: 保证金账户
+      - generic [ref=e41]:
+        - generic [ref=e45]:
+          - generic [ref=e46]: 
+          - generic [ref=e47]:
+            - generic [ref=e48]:
+              - generic [ref=e49]: 订单货款到账说明：
+              - generic [ref=e50]:
+                - generic [ref=e51]: 快递物流签收不代表拼多多平台上的订单签收，只有当消费者在拼多多内主动确认收货或订单发货一段时间后自动签收时，该笔订单款项将结算到商家账户；
+                - generic [ref=e52]: 订单确认签收后入账有一定延时，若暂未到账请1小时后重新查询。
+            - paragraph [ref=e53]:
+              - text: 技术服务费说明：每笔订单将扣除相应技术服务费，具体收费标准及结算规则详见
+              - generic [ref=e54] [cursor=pointer]: 《拼多多技术服务费收费规则》
+              - text: 等平台协议及规则。
+        - generic [ref=e55]:
+          - generic [ref=e56]:
+            - generic [ref=e58]:
+              - generic [ref=e61] [cursor=pointer]: 货款明细
+              - generic [ref=e64] [cursor=pointer]: 日汇总
+              - generic [ref=e67] [cursor=pointer]: 月汇总
+              - generic [ref=e70] [cursor=pointer]: 货款明细导出
+            - generic [ref=e71] [cursor=pointer]:
+              - generic [ref=e73]: 获取日账单密钥
+              - generic [ref=e75]: 导出历史
+          - generic [ref=e77]:
+            - generic [ref=e80]:
+              - generic [ref=e81]:
+                - generic [ref=e84]: 日期选择
+                - generic [ref=e89] [cursor=pointer]:
+                  - textbox "开始日期-结束日期" [ref=e91]: 2026-06-14 00:00:00 ~ 2026-06-14 23:59:59
+                  - generic [ref=e94]: 
+              - generic [ref=e95]:
+                - button "查询" [ref=e96] [cursor=pointer]
+                - button "重置" [ref=e97] [cursor=pointer]
+                - button "导出" [ref=e98] [cursor=pointer]
+                - generic [ref=e100] [cursor=pointer]:
+                  - text: 展开高级选项
+                  - generic [ref=e101]: 
+            - generic [ref=e102]:
+              - generic [ref=e103]:
+                - generic [ref=e104]: 收入金额（元）
+                - generic [ref=e106]: "+52999.67"
+              - generic [ref=e107]:
+                - generic [ref=e108]: 收入笔数（笔）
+                - generic [ref=e109]: "246"
+              - generic [ref=e110]:
+                - generic [ref=e111]: 支出金额（元）
+                - generic [ref=e113]: "-2904.85"
+              - generic [ref=e114]:
+                - generic [ref=e115]: 支出笔数（笔）
+                - generic [ref=e116]: "459"
+            - table [ref=e120]:
+              - rowgroup [ref=e128]:
+                - row "入账时间 商户订单号 账务类型 收支金额(元) 备注 业务描述" [ref=e129]:
+                  - columnheader "入账时间" [ref=e130]
+                  - columnheader "商户订单号" [ref=e131]
+                  - columnheader "账务类型" [ref=e132]
+                  - columnheader "收支金额(元)" [ref=e133]
+                  - columnheader "备注" [ref=e134]
+                  - columnheader "业务描述" [ref=e135]
+              - rowgroup [ref=e136]:
+                - row "2026-06-14 15:01:57 260614-604315380090625 技术服务费 +0.30 类目技术服务费返还 0030004 | 技术服务费-类目技术服务费" [ref=e137]:
+                  - cell "2026-06-14 15:01:57" [ref=e138]
+                  - cell "260614-604315380090625" [ref=e139]:
+                    - generic [ref=e140] [cursor=pointer]: 260614-604315380090625
+                  - cell "技术服务费" [ref=e141]
+                  - cell "+0.30" [ref=e142]:
+                    - generic [ref=e143]: "+0.30"
+                  - cell "类目技术服务费返还" [ref=e144]:
+                    - generic [ref=e146]: 类目技术服务费返还
+                  - cell "0030004 | 技术服务费-类目技术服务费" [ref=e147]
+                - row "2026-06-14 15:00:56 260614-604315380090625 技术服务费 -0.30 类目技术服务费 0030004 | 技术服务费-类目技术服务费" [ref=e148]:
+                  - cell "2026-06-14 15:00:56" [ref=e149]
+                  - cell "260614-604315380090625" [ref=e150]:
+                    - generic [ref=e151] [cursor=pointer]: 260614-604315380090625
+                  - cell "技术服务费" [ref=e152]
+                  - cell "-0.30" [ref=e153]:
+                    - generic [ref=e154]: "-0.30"
+                  - cell "类目技术服务费" [ref=e155]:
+                    - generic [ref=e157]: 类目技术服务费
+                  - cell "0030004 | 技术服务费-类目技术服务费" [ref=e158]
+                - row "2026-06-14 15:00:56 260614-257656102462426 技术服务费 -0.10 类目技术服务费 0030004 | 技术服务费-类目技术服务费" [ref=e159]:
+                  - cell "2026-06-14 15:00:56" [ref=e160]
+                  - cell "260614-257656102462426" [ref=e161]:
+                    - generic [ref=e162] [cursor=pointer]: 260614-257656102462426
+                  - cell "技术服务费" [ref=e163]
+                  - cell "-0.10" [ref=e164]:
+                    - generic [ref=e165]: "-0.10"
+                  - cell "类目技术服务费" [ref=e166]:
+                    - generic [ref=e168]: 类目技术服务费
+                  - cell "0030004 | 技术服务费-类目技术服务费" [ref=e169]
+                - row "2026-06-14 15:00:55 260614-257656102462426 交易收入 +49.90 - 0010002 | 交易收入-订单收入" [ref=e170]:
+                  - cell "2026-06-14 15:00:55" [ref=e171]
+                  - cell "260614-257656102462426" [ref=e172]:
+                    - generic [ref=e173] [cursor=pointer]: 260614-257656102462426
+                  - cell "交易收入" [ref=e174]
+                  - cell "+49.90" [ref=e175]:
+                    - generic [ref=e176]: "+49.90"
+                  - cell "-" [ref=e177]:
+                    - generic [ref=e179]: "-"
+                  - cell "0010002 | 交易收入-订单收入" [ref=e180]
+                - row "2026-06-14 15:00:55 260614-257656102462426 技术服务费 -0.30 - 0030002 | 技术服务费-基础技术服务费" [ref=e181]:
+                  - cell "2026-06-14 15:00:55" [ref=e182]
+                  - cell "260614-257656102462426" [ref=e183]:
+                    - generic [ref=e184] [cursor=pointer]: 260614-257656102462426
+                  - cell "技术服务费" [ref=e185]
+                  - cell "-0.30" [ref=e186]:
+                    - generic [ref=e187]: "-0.30"
+                  - cell "-" [ref=e188]:
+                    - generic [ref=e190]: "-"
+                  - cell "0030002 | 技术服务费-基础技术服务费" [ref=e191]
+                - row "2026-06-14 15:00:55 260614-604315380090625 退款 -199.90 - 0020002 | 交易退款-订单退款" [ref=e192]:
+                  - cell "2026-06-14 15:00:55" [ref=e193]
+                  - cell "260614-604315380090625" [ref=e194]:
+                    - generic [ref=e195] [cursor=pointer]: 260614-604315380090625
+                  - cell "退款" [ref=e196]
+                  - cell "-199.90" [ref=e197]:
+                    - generic [ref=e198]: "-199.90"
+                  - cell "-" [ref=e199]:
+                    - generic [ref=e201]: "-"
+                  - cell "0020002 | 交易退款-订单退款" [ref=e202]
+                - row "2026-06-14 15:00:55 260614-604315380090625 技术服务费 +1.20 基础技术服务费返还 0030002 | 技术服务费-基础技术服务费" [ref=e203]:
+                  - cell "2026-06-14 15:00:55" [ref=e204]
+                  - cell "260614-604315380090625" [ref=e205]:
+                    - generic [ref=e206] [cursor=pointer]: 260614-604315380090625
+                  - cell "技术服务费" [ref=e207]
+                  - cell "+1.20" [ref=e208]:
+                    - generic [ref=e209]: "+1.20"
+                  - cell "基础技术服务费返还" [ref=e210]:
+                    - generic [ref=e212]: 基础技术服务费返还
+                  - cell "0030002 | 技术服务费-基础技术服务费" [ref=e213]
+                - row "2026-06-14 15:00:55 260614-604315380090625 交易收入 +199.90 - 0010002 | 交易收入-订单收入" [ref=e214]:
+                  - cell "2026-06-14 15:00:55" [ref=e215]
+                  - cell "260614-604315380090625" [ref=e216]:
+                    - generic [ref=e217] [cursor=pointer]: 260614-604315380090625
+                  - cell "交易收入" [ref=e218]
+                  - cell "+199.90" [ref=e219]:
+                    - generic [ref=e220]: "+199.90"
+                  - cell "-" [ref=e221]:
+                    - generic [ref=e223]: "-"
+                  - cell "0010002 | 交易收入-订单收入" [ref=e224]
+                - row "2026-06-14 14:56:57 260614-191323226522142 技术服务费 +0.30 类目技术服务费返还 0030004 | 技术服务费-类目技术服务费" [ref=e225]:
+                  - cell "2026-06-14 14:56:57" [ref=e226]
+                  - cell "260614-191323226522142" [ref=e227]:
+                    - generic [ref=e228] [cursor=pointer]: 260614-191323226522142
+                  - cell "技术服务费" [ref=e229]
+                  - cell "+0.30" [ref=e230]:
+                    - generic [ref=e231]: "+0.30"
+                  - cell "类目技术服务费返还" [ref=e232]:
+                    - generic [ref=e234]: 类目技术服务费返还
+                  - cell "0030004 | 技术服务费-类目技术服务费" [ref=e235]
+                - row "2026-06-14 14:56:57 260614-276991885722142 技术服务费 +0.30 类目技术服务费返还 0030004 | 技术服务费-类目技术服务费" [ref=e236]:
+                  - cell "2026-06-14 14:56:57" [ref=e237]
+                  - cell "260614-276991885722142" [ref=e238]:
+                    - generic [ref=e239] [cursor=pointer]: 260614-276991885722142
+                  - cell "技术服务费" [ref=e240]
+                  - cell "+0.30" [ref=e241]:
+                    - generic [ref=e242]: "+0.30"
+                  - cell "类目技术服务费返还" [ref=e243]:
+                    - generic [ref=e245]: 类目技术服务费返还
+                  - cell "0030004 | 技术服务费-类目技术服务费" [ref=e246]
+                - row "2026-06-14 14:55:56 260614-276991885722142 技术服务费 -0.30 类目技术服务费 0030004 | 技术服务费-类目技术服务费" [ref=e247]:
+                  - cell "2026-06-14 14:55:56" [ref=e248]
+                  - cell "260614-276991885722142" [ref=e249]:
+                    - generic [ref=e250] [cursor=pointer]: 260614-276991885722142
+                  - cell "技术服务费" [ref=e251]
+                  - cell "-0.30" [ref=e252]:
+                    - generic [ref=e253]: "-0.30"
+                  - cell "类目技术服务费" [ref=e254]:
+                    - generic [ref=e256]: 类目技术服务费
+                  - cell "0030004 | 技术服务费-类目技术服务费" [ref=e257]
+                - row "2026-06-14 14:55:56 260614-276991885722142 技术服务费 +0.60 基础技术服务费返还 0030002 | 技术服务费-基础技术服务费" [ref=e258]:
+                  - cell "2026-06-14 14:55:56" [ref=e259]
+                  - cell "260614-276991885722142" [ref=e260]:
+                    - generic [ref=e261] [cursor=pointer]: 260614-276991885722142
+                  - cell "技术服务费" [ref=e262]
+                  - cell "+0.60" [ref=e263]:
+                    - generic [ref=e264]: "+0.60"
+                  - cell "基础技术服务费返还" [ref=e265]:
+                    - generic [ref=e267]: 基础技术服务费返还
+                  - cell "0030002 | 技术服务费-基础技术服务费" [ref=e268]
+                - row "2026-06-14 14:55:56 260614-191323226522142 退款 -199.90 - 0020002 | 交易退款-订单退款" [ref=e269]:
+                  - cell "2026-06-14 14:55:56" [ref=e270]
+                  - cell "260614-191323226522142" [ref=e271]:
+                    - generic [ref=e272] [cursor=pointer]: 260614-191323226522142
+                  - cell "退款" [ref=e273]
+                  - cell "-199.90" [ref=e274]:
+                    - generic [ref=e275]: "-199.90"
+                  - cell "-" [ref=e276]:
+                    - generic [ref=e278]: "-"
+                  - cell "0020002 | 交易退款-订单退款" [ref=e279]
+                - row "2026-06-14 14:55:56 260614-191323226522142 技术服务费 -0.30 类目技术服务费 0030004 | 技术服务费-类目技术服务费" [ref=e280]:
+                  - cell "2026-06-14 14:55:56" [ref=e281]
+                  - cell "260614-191323226522142" [ref=e282]:
+                    - generic [ref=e283] [cursor=pointer]: 260614-191323226522142
+                  - cell "技术服务费" [ref=e284]
+                  - cell "-0.30" [ref=e285]:
+                    - generic [ref=e286]: "-0.30"
+                  - cell "类目技术服务费" [ref=e287]:
+                    - generic [ref=e289]: 类目技术服务费
+                  - cell "0030004 | 技术服务费-类目技术服务费" [ref=e290]
+                - row "2026-06-14 14:55:56 260614-276991885722142 退款 -99.90 - 0020002 | 交易退款-订单退款" [ref=e291]:
+                  - cell "2026-06-14 14:55:56" [ref=e292]
+                  - cell "260614-276991885722142" [ref=e293]:
+                    - generic [ref=e294] [cursor=pointer]: 260614-276991885722142
+                  - cell "退款" [ref=e295]
+                  - cell "-99.90" [ref=e296]:
+                    - generic [ref=e297]: "-99.90"
+                  - cell "-" [ref=e298]:
+                    - generic [ref=e300]: "-"
+                  - cell "0020002 | 交易退款-订单退款" [ref=e301]
+                - row "2026-06-14 14:55:56 260614-276991885722142 交易收入 +99.90 - 0010002 | 交易收入-订单收入" [ref=e302]:
+                  - cell "2026-06-14 14:55:56" [ref=e303]
+                  - cell "260614-276991885722142" [ref=e304]:
+                    - generic [ref=e305] [cursor=pointer]: 260614-276991885722142
+                  - cell "交易收入" [ref=e306]
+                  - cell "+99.90" [ref=e307]:
+                    - generic [ref=e308]: "+99.90"
+                  - cell "-" [ref=e309]:
+                    - generic [ref=e311]: "-"
+                  - cell "0010002 | 交易收入-订单收入" [ref=e312]
+                - row "2026-06-14 14:55:56 260614-191323226522142 交易收入 +199.90 - 0010002 | 交易收入-订单收入" [ref=e313]:
+                  - cell "2026-06-14 14:55:56" [ref=e314]
+                  - cell "260614-191323226522142" [ref=e315]:
+                    - generic [ref=e316] [cursor=pointer]: 260614-191323226522142
+                  - cell "交易收入" [ref=e317]
+                  - cell "+199.90" [ref=e318]:
+                    - generic [ref=e319]: "+199.90"
+                  - cell "-" [ref=e320]:
+                    - generic [ref=e322]: "-"
+                  - cell "0010002 | 交易收入-订单收入" [ref=e323]
+                - row "2026-06-14 14:55:56 260604-676142856551234 技术服务费 -0.30 类目技术服务费 0030004 | 技术服务费-类目技术服务费" [ref=e324]:
+                  - cell "2026-06-14 14:55:56" [ref=e325]
+                  - cell "260604-676142856551234" [ref=e326]:
+                    - generic [ref=e327] [cursor=pointer]: 260604-676142856551234
+                  - cell "技术服务费" [ref=e328]
+                  - cell "-0.30" [ref=e329]:
+                    - generic [ref=e330]: "-0.30"
+                  - cell "类目技术服务费" [ref=e331]:
+                    - generic [ref=e333]: 类目技术服务费
+                  - cell "0030004 | 技术服务费-类目技术服务费" [ref=e334]
+                - row "2026-06-14 14:55:56 260614-191323226522142 技术服务费 +1.20 基础技术服务费返还 0030002 | 技术服务费-基础技术服务费" [ref=e335]:
+                  - cell "2026-06-14 14:55:56" [ref=e336]
+                  - cell "260614-191323226522142" [ref=e337]:
+                    - generic [ref=e338] [cursor=pointer]: 260614-191323226522142
+                  - cell "技术服务费" [ref=e339]
+                  - cell "+1.20" [ref=e340]:
+                    - generic [ref=e341]: "+1.20"
+                  - cell "基础技术服务费返还" [ref=e342]:
+                    - generic [ref=e344]: 基础技术服务费返还
+                  - cell "0030002 | 技术服务费-基础技术服务费" [ref=e345]
+                - row "2026-06-14 14:55:56 260604-676142856551234 交易收入 +99.90 - 0010002 | 交易收入-订单收入" [ref=e346]:
+                  - cell "2026-06-14 14:55:56" [ref=e347]
+                  - cell "260604-676142856551234" [ref=e348]:
+                    - generic [ref=e349] [cursor=pointer]: 260604-676142856551234
+                  - cell "交易收入" [ref=e350]
+                  - cell "+99.90" [ref=e351]:
+                    - generic [ref=e352]: "+99.90"
+                  - cell "-" [ref=e353]:
+                    - generic [ref=e355]: "-"
+                  - cell "0010002 | 交易收入-订单收入" [ref=e356]
+            - list [ref=e359]:
+              - listitem [ref=e360]: 共有 705 条
+              - listitem [ref=e361]:
+                - text: 每页
+                - generic [ref=e368] [cursor=pointer]:
+                  - textbox [ref=e370]: "20"
+                  - generic [ref=e374]: 
+                - text: 条
+              - listitem [ref=e375]:
+                - generic [ref=e376]: 
+              - listitem [ref=e377] [cursor=pointer]: "1"
+              - listitem [ref=e378] [cursor=pointer]: "2"
+              - listitem [ref=e379] [cursor=pointer]: "3"
+              - listitem [ref=e380] [cursor=pointer]: "4"
+              - listitem [ref=e381] [cursor=pointer]: "5"
+              - listitem [ref=e382] [cursor=pointer]: •••
+              - listitem [ref=e383] [cursor=pointer]:
+                - generic [ref=e384]: 
+    - generic [ref=e387] [cursor=pointer]:
+      - generic [ref=e388]: 官方
+      - generic [ref=e389]: 客服

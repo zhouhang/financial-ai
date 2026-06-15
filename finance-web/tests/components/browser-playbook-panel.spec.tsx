@@ -157,47 +157,71 @@ describe('BrowserPlaybookPanel', () => {
     expect(screen.queryByText('浏览器任务 21')).not.toBeInTheDocument();
   }, 10000);
 
-  it('按店铺归组展示店铺订单和收支明细任务', () => {
+  it('浏览器任务列表按创建时间倒序排列', () => {
     render(
       <BrowserPlaybookPanel
         authToken="token-1"
         sources={[
           {
             ...sources[0],
-            id: 'shop-a-order',
-            name: '甲店-店铺订单',
-            metadata: { registration_title: '甲店-店铺订单' },
+            id: 'task-oldest',
+            name: '最早任务',
+            metadata: { registration_title: '最早任务' },
+            created_at: '2026-05-20T09:00:00+08:00',
           },
           {
             ...sources[0],
-            id: 'shop-b-order',
-            name: '乙店-店铺订单',
-            metadata: { registration_title: '乙店-店铺订单' },
+            id: 'task-newest',
+            name: '最新任务',
+            metadata: { registration_title: '最新任务' },
+            created_at: '2026-05-25T09:00:00+08:00',
           },
           {
             ...sources[0],
-            id: 'shop-a-bill',
-            name: '甲店-收支明细',
-            metadata: { registration_title: '甲店-收支明细' },
-          },
-          {
-            ...sources[0],
-            id: 'shop-b-bill',
-            name: '乙店-收支账单',
-            metadata: { registration_title: '乙店-收支账单' },
+            id: 'task-middle',
+            name: '居中任务',
+            metadata: { registration_title: '居中任务' },
+            created_at: '2026-05-22T09:00:00+08:00',
           },
         ]}
       />,
     );
 
-    const shopAOrder = screen.getByText('甲店-店铺订单');
-    const shopABill = screen.getByText('甲店-收支明细');
-    const shopBOrder = screen.getByText('乙店-店铺订单');
-    const shopBBill = screen.getByText('乙店-收支账单');
+    const newest = screen.getByText('最新任务');
+    const middle = screen.getByText('居中任务');
+    const oldest = screen.getByText('最早任务');
 
-    expect(shopAOrder.compareDocumentPosition(shopABill) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(shopABill.compareDocumentPosition(shopBOrder) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(shopBOrder.compareDocumentPosition(shopBBill) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(newest.compareDocumentPosition(middle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(middle.compareDocumentPosition(oldest) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('缺少创建时间的浏览器任务排在有创建时间的任务之后', () => {
+    render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[
+          {
+            ...sources[0],
+            id: 'task-no-created',
+            name: '无创建时间任务',
+            metadata: { registration_title: '无创建时间任务' },
+            created_at: null,
+          },
+          {
+            ...sources[0],
+            id: 'task-with-created',
+            name: '有创建时间任务',
+            metadata: { registration_title: '有创建时间任务' },
+            created_at: '2026-05-22T09:00:00+08:00',
+          },
+        ]}
+      />,
+    );
+
+    const withCreated = screen.getByText('有创建时间任务');
+    const noCreated = screen.getByText('无创建时间任务');
+
+    expect(withCreated.compareDocumentPosition(noCreated) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('手动清除只展示在卡住任务上并将 MANUAL_CLEARED 显示为已清除', () => {
