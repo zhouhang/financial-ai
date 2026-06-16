@@ -203,6 +203,81 @@ async def test_data_source_list_scans_recent_jobs_for_browser_verification_summa
 
 
 @pytest.mark.anyio
+async def test_browser_playbook_list_prefers_dataset_last_sync_over_stale_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda auth_token: {"company_id": "company-1", "user_id": "user-1", "role": "admin"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_sources",
+        lambda **kwargs: [
+            {
+                "id": "source-browser-1",
+                "company_id": "company-1",
+                "code": "browser-collection-pdd",
+                "name": "博宽充值拼多多订单",
+                "source_kind": "browser_playbook",
+                "domain_type": "ecommerce",
+                "provider_code": "browser_playbook",
+                "execution_mode": "deterministic",
+                "status": "active",
+                "is_enabled": True,
+                "health_status": "healthy",
+                "updated_at": "2026-06-14T10:00:00+08:00",
+                "meta": {},
+            }
+        ],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_data_source_datasets",
+        lambda **kwargs: [
+            {
+                "id": "dataset-browser-1",
+                "company_id": "company-1",
+                "data_source_id": "source-browser-1",
+                "dataset_code": "browser-collection-pdd",
+                "dataset_name": "博宽充值拼多多订单",
+                "resource_key": "browser-collection-pdd@1",
+                "dataset_kind": "browser_playbook",
+                "source_type": "browser_collection_records",
+                "publish_status": "published",
+                "health_status": "healthy",
+                "last_sync_at": "2026-06-16T10:17:17+08:00",
+                "meta": {"source_type": "browser_collection_records"},
+            }
+        ],
+        raising=False,
+    )
+    monkeypatch.setattr(data_sources.auth_db, "get_unified_data_source_credentials", lambda **kwargs: None)
+    monkeypatch.setattr(data_sources, "_load_source_configs", lambda source_id: {})
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_unified_sync_jobs",
+        lambda **kwargs: [
+            {
+                "id": "sync-old-1",
+                "job_status": "success",
+                "is_verification": False,
+                "updated_at": "2026-06-14T10:00:00+08:00",
+                "completed_at": "2026-06-14T10:00:00+08:00",
+            }
+        ],
+        raising=False,
+    )
+
+    result = await data_sources._handle_data_source_list({"auth_token": "token"})
+
+    assert result["success"] is True
+    source = result["sources"][0]
+    assert source["updated_at"] == "2026-06-14T10:00:00+08:00"
+    assert source["last_sync_at"] == "2026-06-16T10:17:17+08:00"
+
+
+@pytest.mark.anyio
 async def test_browser_playbook_detail_returns_safe_credential_and_latest_records(monkeypatch) -> None:
     monkeypatch.setattr(
         data_sources,

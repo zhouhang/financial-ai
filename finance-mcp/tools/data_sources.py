@@ -3824,6 +3824,21 @@ def _build_health_summary(source_row: dict[str, Any], dataset_rows: list[dict[st
     }
 
 
+def _build_source_last_sync_at(
+    *,
+    latest_job: dict[str, Any] | None,
+    dataset_summary: dict[str, Any],
+) -> str | None:
+    latest_at = _pick_latest_iso(
+        [
+            (latest_job or {}).get("completed_at"),
+            (latest_job or {}).get("updated_at"),
+            dataset_summary.get("last_sync_at"),
+        ]
+    )
+    return latest_at or None
+
+
 def _list_datasets_with_compat(
     *,
     company_id: str,
@@ -4421,7 +4436,10 @@ def _build_data_source_view(
         "health_status": _normalize_health_status(source_row.get("health_status")),
         "last_checked_at": source_row.get("last_checked_at"),
         "last_error_message": str(source_row.get("last_error_message") or ""),
-        "last_sync_at": (latest_job or {}).get("completed_at") or (latest_job or {}).get("updated_at"),
+        "last_sync_at": _build_source_last_sync_at(
+            latest_job=latest_job,
+            dataset_summary=dataset_summary,
+        ),
         "last_sync_job_id": str((latest_job or {}).get("id") or ""),
         "last_sync_status": str((latest_job or {}).get("job_status") or ""),
         "browser_verification": browser_verification,
