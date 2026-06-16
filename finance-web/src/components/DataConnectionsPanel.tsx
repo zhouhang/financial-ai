@@ -2029,6 +2029,7 @@ function normalizeSourceItem(raw: unknown): DataSourceListItem | null {
     execution_mode: value.execution_mode === 'agent_assisted' ? 'agent_assisted' : 'deterministic',
     description: asString(value.description),
     updated_at: asStringOrNull(value.updated_at),
+    last_sync_at: asStringOrNull(value.last_sync_at),
     health_status: asString(value.health_status),
     last_checked_at: asStringOrNull(value.last_checked_at),
     last_error_message: asStringOrNull(value.last_error_message),
