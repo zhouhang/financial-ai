@@ -14,6 +14,10 @@ from browser_playbook.agent_connection import FakeAgentConnectionManager
 from browser_playbook.dispatcher import BrowserPlaybookDispatcher
 
 
+def _compact_sql(sql: str) -> str:
+    return " ".join(sql.split())
+
+
 def _import_mcp_data_sources():
     import importlib
     import types
@@ -227,7 +231,9 @@ def test_dispatcher_marks_runner_failure() -> None:
     assert fake_db.failures[0]["fail_reason"] == "PAGE_CHANGED"
 
 
-def test_claim_next_browser_sync_job_filters_by_source_kind_agent_and_binding_health(monkeypatch) -> None:
+def test_claim_next_browser_sync_job_sql_includes_binding_health_and_active_playbook(
+    monkeypatch,
+) -> None:
     captured: dict[str, str] = {}
 
     class _Cursor:
@@ -270,6 +276,7 @@ def test_claim_next_browser_sync_job_filters_by_source_kind_agent_and_binding_he
     auth_db.claim_next_browser_sync_job(agent_id="agent-001")
 
     sql = captured["sql"]
+    compact_sql = _compact_sql(sql)
     assert "JOIN data_sources ds ON ds.id = sync_jobs.data_source_id" in sql
     assert "JOIN shop_runtime_bindings srb" in sql
     assert "ds.source_kind = 'browser_playbook'" in sql
@@ -283,11 +290,121 @@ def test_claim_next_browser_sync_job_filters_by_source_kind_agent_and_binding_he
         "AND srb.playbook_status = 'ok'"
     ) in sql
     assert "running_for_agent.running_count < %s" in sql
+    assert "NOT EXISTS (" in compact_sql
+    assert "running_jobs.is_verification = FALSE" in compact_sql
+    assert "running_srb.agent_id = srb.agent_id" in compact_sql
+    assert "NULLIF(running_srb.runtime_profile_ref, '')" in compact_sql
+    assert "NULLIF(running_srb.shop_id, '')" in compact_sql
+    assert "NULLIF(srb.runtime_profile_ref, '')" in compact_sql
+    assert "NULLIF(srb.shop_id, '')" in compact_sql
+    assert "sync_jobs.is_verification = TRUE" in compact_sql
+    assert "OR NOT EXISTS (" in compact_sql
     assert "running_for_agent AS (" in sql
     assert "JOIN LATERAL" not in sql
     assert "sync_jobs.is_verification = TRUE AND p.status IN ('draft', 'active')" in sql
     assert "sync_jobs.is_verification = FALSE AND p.status = 'active'" in sql
     assert "request_payload ->" not in sql
+
+
+def test_claim_next_browser_sync_job_profile_gate_preserves_verification_bypass(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql: str, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchone(self):
+            return None
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            return None
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    auth_db.claim_next_browser_sync_job(agent_id="agent-001", agent_max_concurrency=2)
+
+    compact_sql = _compact_sql(str(captured["sql"]))
+    assert "AND ( sync_jobs.is_verification = TRUE OR NOT EXISTS (" in compact_sql
+    assert "running_jobs.is_verification = FALSE" in compact_sql
+    assert captured["params"] == ("agent-001", "agent-001", 2)
+
+
+def test_claim_next_browser_sync_job_profile_gate_uses_shop_id_fallback(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql: str, params=None):
+            captured["sql"] = sql
+
+        def fetchone(self):
+            return None
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+        def commit(self):
+            return None
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    from auth import db as auth_db
+
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _ConnManager())
+
+    auth_db.claim_next_browser_sync_job(agent_id="agent-001")
+
+    compact_sql = _compact_sql(str(captured["sql"]))
+    assert "NULLIF(running_srb.runtime_profile_ref, '')" in compact_sql
+    assert "NULLIF(running_srb.shop_id, '')" in compact_sql
+    assert "NULLIF(srb.runtime_profile_ref, '')" in compact_sql
+    assert "NULLIF(srb.shop_id, '')" in compact_sql
+    assert compact_sql.count("'unknown'") >= 2
 
 
 def test_claim_next_browser_sync_job_normalize_preserves_enriched_fields(monkeypatch) -> None:

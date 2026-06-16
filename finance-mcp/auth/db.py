@@ -6236,6 +6236,31 @@ def claim_next_browser_sync_job(*, agent_id: str = "", agent_max_concurrency: in
                               (sync_jobs.is_verification = TRUE AND srb.profile_status IN ('verifying', 'active', 'needs_reauth', 'risk_blocked'))
                               OR (sync_jobs.is_verification = FALSE AND srb.profile_status = 'active' AND srb.playbook_status = 'ok')
                           )
+                          AND (
+                              sync_jobs.is_verification = TRUE
+                              OR NOT EXISTS (
+                                  SELECT 1
+                                  FROM sync_jobs running_jobs
+                                  JOIN data_sources running_ds
+                                    ON running_ds.id = running_jobs.data_source_id
+                                  JOIN shop_runtime_bindings running_srb
+                                    ON running_srb.company_id = running_jobs.company_id
+                                   AND running_srb.data_source_id = running_jobs.data_source_id
+                                  WHERE running_jobs.job_status = 'running'
+                                    AND running_jobs.is_verification = FALSE
+                                    AND running_ds.source_kind = 'browser_playbook'
+                                    AND running_srb.agent_id = srb.agent_id
+                                    AND COALESCE(
+                                            NULLIF(running_srb.runtime_profile_ref, ''),
+                                            NULLIF(running_srb.shop_id, ''),
+                                            'unknown'
+                                        ) = COALESCE(
+                                            NULLIF(srb.runtime_profile_ref, ''),
+                                            NULLIF(srb.shop_id, ''),
+                                            'unknown'
+                                        )
+                              )
+                          )
                           AND running_for_agent.running_count < %s
                           AND (sync_jobs.next_retry_at IS NULL OR sync_jobs.next_retry_at <= CURRENT_TIMESTAMP)
                         ORDER BY sync_jobs.created_at ASC
