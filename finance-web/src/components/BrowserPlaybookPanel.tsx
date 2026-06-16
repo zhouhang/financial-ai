@@ -149,7 +149,11 @@ function registrationTitle(source: DataSourceListItem): string {
 }
 
 function defaultCredentialUsername(title: string): string {
-  const shopName = title.replace(/-(店铺订单|收支明细|收支账单)$/, '').trim();
+  // Strip the trailing kind suffix to get the shop name. Taobao/QianNiu titles use
+  // ``-店铺订单/收支明细/收支账单``; PDD/JD/Douyin use ``拼多多/京东/抖音 + 订单/账单`` (no dash).
+  const shopName = title
+    .replace(/(-(?:店铺订单|收支明细|收支账单)|(?:拼多多|京东|抖音)(?:订单|账单))$/, '')
+    .trim();
   return shopName ? `${shopName}:ai财务` : '';
 }
 
@@ -682,17 +686,41 @@ export function BrowserPlaybookPanel({
     [authHeaders, authToken, onRegistered],
   );
 
-  const openCredentialDialog = useCallback((row: BrowserCollectionRow) => {
-    setCredentialDialog({
-      row,
-      form: {
-        credentialUsername: defaultCredentialUsername(row.title),
-        credentialPassword: '',
-      },
-      error: '',
-      submitting: false,
-    });
-  }, []);
+  const openCredentialDialog = useCallback(
+    async (row: BrowserCollectionRow) => {
+      // Open immediately with the title-derived default, then replace it with the actually-saved
+      // username (if any) so re-saving doesn't silently overwrite the credential — and thus the
+      // shared profile ref (login::domain::username) — with a wrong, title-derived name.
+      setCredentialDialog({
+        row,
+        form: {
+          credentialUsername: defaultCredentialUsername(row.title),
+          credentialPassword: '',
+        },
+        error: '',
+        submitting: false,
+      });
+      if (!authToken) return;
+      try {
+        const response = await fetch(
+          `/api/data-sources/${encodeURIComponent(row.source.id)}/browser-playbook/detail?record_limit=1`,
+          { headers: authHeaders },
+        );
+        const body = (await response.json().catch(() => ({}))) as BrowserPlaybookDetailResponse;
+        const savedUsername = text(body.credential?.username);
+        if (savedUsername) {
+          setCredentialDialog((prev) =>
+            prev.row?.source.id === row.source.id
+              ? { ...prev, form: { ...prev.form, credentialUsername: savedUsername } }
+              : prev,
+          );
+        }
+      } catch {
+        // Keep the computed default if the saved username can't be loaded.
+      }
+    },
+    [authHeaders, authToken],
+  );
 
   const closeCredentialDialog = useCallback(() => {
     setCredentialDialog({
@@ -952,7 +980,7 @@ export function BrowserPlaybookPanel({
                           </button>
                           <button
                             type="button"
-                            onClick={() => openCredentialDialog(row)}
+                            onClick={() => void openCredentialDialog(row)}
                             disabled={Boolean(actionBusy)}
                             aria-label={`填密码 ${row.title}`}
                             className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-tertiary disabled:opacity-60"

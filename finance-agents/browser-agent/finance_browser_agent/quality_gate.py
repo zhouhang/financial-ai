@@ -39,6 +39,7 @@ def validate_rows(
     biz_date: str,
     expected_row_count: int | None = None,
     expected_amount_total: str | None = None,
+    enforce_date: bool = True,
 ) -> dict[str, Any]:
     required_columns = [str(column["name"]) for column in columns if bool(column.get("required", True))]
     missing_columns = [column for column in required_columns if any(column not in row for row in rows)]
@@ -49,13 +50,18 @@ def validate_rows(
             "error": f"缺少列: {missing_columns}",
         }
 
-    bad_dates = [row for row in rows if str(row.get(date_field) or "")[:10] != biz_date]
-    if bad_dates:
-        return {
-            "success": False,
-            "fail_reason": "DATA_MISMATCH",
-            "error": "数据日期与 biz_date 不一致",
-        }
+    # Some sources are filtered in the UI by one date basis (e.g. PDD 订单下单时间) while the export
+    # only carries another (订单成交时间), which legitimately spills to the next day or is empty for
+    # unpaid orders. Parsing must collect exactly what the filter returned and leave date-based
+    # culling to the downstream recon proc, so date enforcement is opt-out per playbook.
+    if enforce_date:
+        bad_dates = [row for row in rows if str(row.get(date_field) or "")[:10] != biz_date]
+        if bad_dates:
+            return {
+                "success": False,
+                "fail_reason": "DATA_MISMATCH",
+                "error": "数据日期与 biz_date 不一致",
+            }
 
     seen_keys: set[str] = set()
     for row in rows:

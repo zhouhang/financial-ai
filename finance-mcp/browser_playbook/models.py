@@ -10,6 +10,7 @@ ActionType = Literal[
     "login_if_needed",
     "navigate",
     "click",
+    "click_if_present",
     "fill",
     "ensure_page_ready",
     "set_date",
@@ -74,6 +75,7 @@ class PlaybookStep(BaseModel):
     drop_row_prefix: str | None = None
     header_selector: str | None = None
     day_cell_selector: str | None = None
+    end_selector: str | None = None
     out_of_month_marker: str | None = None
     prev_month_selector: str | None = None
     next_month_selector: str | None = None
@@ -117,6 +119,8 @@ class PlaybookStep(BaseModel):
     password_value: str | None = None
     username_value_from: str | None = None
     password_value_from: str | None = None
+    login_mode_selectors: list[str] | None = None
+    pre_submit_click_selectors: list[str] | None = None
     post_login_wait_selector: str | None = None
     wait_for_post_login_selector: bool | None = None
     summary_field: str | None = None
@@ -130,6 +134,7 @@ class PlaybookStep(BaseModel):
     allow_auth_redirect: bool | None = None
     recover_attempts: int | None = None
     wait_after_navigation_ms: int | None = None
+    visible_timeout_ms: int | None = None
 
     @model_validator(mode="after")
     def validate_action_contract(self) -> "PlaybookStep":
@@ -161,6 +166,7 @@ class PlaybookStep(BaseModel):
                 raise ValueError(f"{self.action} requires password_value or password_value_from")
         if self.action in {
             "click",
+            "click_if_present",
             "fill",
             "set_date",
             "set_range_calendar_day",

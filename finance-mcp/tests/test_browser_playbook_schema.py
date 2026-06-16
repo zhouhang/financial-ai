@@ -173,6 +173,8 @@ def test_playbook_accepts_login_action_contract() -> None:
             "username_value_from": "params.login_username",
             "password_value_from": "params.login_password",
             "post_login_wait_selector": ".account-menu",
+            "login_mode_selectors": ["text=邮箱登录"],
+            "pre_submit_click_selectors": ["input[type='checkbox']"],
         },
     )
 
@@ -193,6 +195,68 @@ def test_playbook_accepts_login_action_contract() -> None:
     )
 
     assert msg.playbook_body.steps[1].action == "login_if_needed"
+    assert msg.playbook_body.steps[1].login_mode_selectors == ["text=邮箱登录"]
+    assert msg.playbook_body.steps[1].pre_submit_click_selectors == ["input[type='checkbox']"]
+
+
+def test_playbook_accepts_optional_click_action() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps.insert(
+        1,
+        {
+            "id": "select_shop_if_present",
+            "action": "click_if_present",
+            "selector": "[class*='index_roleItem']:has-text('博宽数娱')",
+            "timeout_ms": 30000,
+            "visible_timeout_ms": 1000,
+        },
+    )
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.steps[1].action == "click_if_present"
+    assert msg.playbook_body.steps[1].visible_timeout_ms == 1000
+
+
+def test_set_range_calendar_day_accepts_end_selector() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps[1] = {
+        "id": "set_order_date",
+        "action": "set_range_calendar_day",
+        "selector": "input[placeholder='开始时间']",
+        "end_selector": "input[placeholder='结束时间']",
+        "value_from": "params.biz_date",
+    }
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    dumped = msg.playbook_body.model_dump()
+    assert msg.playbook_body.steps[1].end_selector == "input[placeholder='结束时间']"
+    assert dumped["steps"][1]["end_selector"] == "input[placeholder='结束时间']"
 
 
 def test_playbook_accepts_download_history_file_action() -> None:
@@ -633,6 +697,39 @@ def test_playbook_rejects_login_action_without_credential_sources() -> None:
                 "runtime_profile_ref": "profiles/shop-001",
             }
         )
+
+
+def test_playbook_accepts_login_mode_selectors_for_login_action() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps.insert(
+        1,
+        {
+            "id": "login_if_needed",
+            "action": "login_if_needed",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type='submit']",
+            "username_value_from": "params.login_username",
+            "password_value_from": "params.login_password",
+            "login_mode_selectors": ["text=邮箱登录"],
+        },
+    )
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.steps[1].login_mode_selectors == ["text=邮箱登录"]
 
 
 @pytest.mark.parametrize(

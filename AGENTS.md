@@ -247,9 +247,13 @@ export interface Message {
    - If a change would make a large file larger, document why extraction is not practical in the final response and keep the added surface minimal.
 
 7. **Browser Collection Playbook First**:
-   - For browser collection page changes, popup changes, selector drift, or new page collection,
-     prefer modifying or adding browser playbooks.
-   - Change Python runner code only when a reusable browser capability is missing.
+   - For browser collection failures, page changes, popup changes, selector drift, or new page
+     collection, default to modifying only the affected browser playbook/configuration.
+   - Do not modify shared browser runner code first. If a code change appears necessary, pause and
+     confirm with the user before editing code.
+   - When asking for confirmation, explain why the playbook cannot solve it, whether the change is
+     platform-specific (for example only Douyin) or a reusable capability for future browser
+     collections, what existing playbooks may be affected, and how it will be verified.
    - Site-specific selectors, popup markers, and popup close selectors belong in playbooks, not in
      `finance_browser_agent.playwright_runner`.
 

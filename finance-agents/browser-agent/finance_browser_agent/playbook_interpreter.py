@@ -8,6 +8,7 @@ VALID_ACTIONS = {
     "login_if_needed",
     "navigate",
     "click",
+    "click_if_present",
     "fill",
     "ensure_page_ready",
     "set_date",

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import date
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,6 +20,8 @@ import pytest
 from finance_browser_agent import data_agent_ws as data_agent_ws_module
 from finance_browser_agent.data_agent_ws import DataAgentWsClient
 from finance_browser_agent import dispatcher_loop as dl_module
+from finance_browser_agent.playbook_interpreter import validate_step_actions
+from finance_browser_agent import playwright_runner as pr
 from finance_browser_agent.dispatcher_loop import BrowserDispatcherLoop
 from finance_browser_agent.tally_client import BrowserAgentConfig, BrowserAgentTallyClient
 
@@ -73,6 +76,220 @@ def _make_loop(runner_result: dict[str, Any]) -> tuple[BrowserDispatcherLoop, As
 
     loop = BrowserDispatcherLoop(client=client, runner=sync_runner, max_concurrency=1)
     return loop, client, risk_calls
+
+
+class _FakeLoginModeCandidate:
+    """Records click attempts; only succeeds for configured selectors."""
+
+    def __init__(self, succeeds_for: set[str]) -> None:
+        self.succeeds_for = succeeds_for
+        self.click_attempts: list[str] = []
+
+    def click(self, selector: str, timeout: int = 0) -> None:
+        self.click_attempts.append(selector)
+        if selector not in self.succeeds_for:
+            raise RuntimeError(f"no such element: {selector}")
+
+
+class _FakeRiskyLoginModeCandidate(_FakeLoginModeCandidate):
+    url = "https://fxg.jinritemai.com/login/common"
+    typed: list[tuple[str, str]]
+
+    def __init__(self, succeeds_for: set[str]) -> None:
+        super().__init__(succeeds_for)
+        self.typed = []
+
+    def locator(self, _selector: str):
+        page = self
+        selector = _selector
+
+        class _First:
+            def inner_text(self, timeout: int = 0) -> str:
+                if page.click_attempts:
+                    return "邮箱登录"
+                return "手机登录 请输入验证码 获取验证码 邮箱登录"
+
+            def wait_for(self, timeout: int = 0) -> None:
+                if not page.click_attempts:
+                    raise RuntimeError("login controls are not visible yet")
+
+            def input_value(self, timeout: int = 0) -> str:
+                for filled_selector, value in reversed(page.typed):
+                    if filled_selector == selector:
+                        return value
+                return ""
+
+        class _Locator:
+            first = _First()
+
+        return _Locator()
+
+    def content(self) -> str:
+        if self.click_attempts:
+            return "邮箱登录"
+        return "手机登录 请输入验证码 获取验证码 邮箱登录"
+
+    def fill(self, selector: str, value: str, timeout: int = 0) -> None:
+        if not self.click_attempts:
+            raise RuntimeError("login controls are not visible yet")
+        self.typed.append((selector, value))
+
+    def wait_for_timeout(self, delay_ms: int) -> None:
+        return None
+
+
+class _FakeLoginWithAgreementCandidate(_FakeRiskyLoginModeCandidate):
+    agreement_checked = False
+
+    def click(self, selector: str, timeout: int = 0) -> None:
+        self.click_attempts.append(selector)
+        if selector == "input[type=checkbox]":
+            self.agreement_checked = True
+            return
+        if selector not in self.succeeds_for:
+            raise RuntimeError(f"no such element: {selector}")
+
+
+class _FakeNavigateSmsLoginPage:
+    url = "https://fxg.jinritemai.com/login/common"
+
+    def __init__(self) -> None:
+        self.goto_calls: list[str] = []
+
+    def goto(self, url: str, wait_until: str = "load", timeout: int = 0) -> None:
+        self.goto_calls.append(url)
+
+    def locator(self, _selector: str):
+        class _First:
+            def inner_text(self, timeout: int = 0) -> str:
+                return "手机登录 请输入验证码 获取验证码 邮箱登录"
+
+        class _Locator:
+            first = _First()
+
+        return _Locator()
+
+    def content(self) -> str:
+        return "手机登录 请输入验证码 获取验证码 邮箱登录"
+
+
+class _FakeRiskVerificationPage:
+    url = "https://fxg.jinritemai.com/login/common"
+    frames: list[Any] = []
+
+    def locator(self, _selector: str):
+        class _First:
+            def inner_text(self, timeout: int = 0) -> str:
+                return "请完成下列验证后继续 按住左边按钮拖动完成上方拼图"
+
+        class _Locator:
+            first = _First()
+
+        return _Locator()
+
+    def content(self) -> str:
+        return "请完成下列验证后继续 按住左边按钮拖动完成上方拼图"
+
+    def wait_for_timeout(self, delay_ms: int) -> None:
+        return None
+
+
+class _FakeOptionalClickLocator:
+    def __init__(self, page: "_FakeOptionalClickPage", selector: str = "") -> None:
+        self.page = page
+        self.selector = selector
+
+    @property
+    def first(self) -> "_FakeOptionalClickLocator":
+        return self
+
+    def is_visible(self, timeout: int = 0) -> bool:
+        if self.page.visible_selectors is not None:
+            return self.selector in self.page.visible_selectors
+        return self.page.visible
+
+
+class _FakeOptionalClickPage:
+    def __init__(
+        self,
+        *,
+        visible: bool,
+        visible_selectors: set[str] | None = None,
+    ) -> None:
+        self.visible = visible
+        self.visible_selectors = visible_selectors
+        self.clicks: list[str] = []
+
+    def locator(self, selector: str) -> _FakeOptionalClickLocator:
+        return _FakeOptionalClickLocator(self, selector)
+
+    def click(self, selector: str, timeout: int = 0) -> None:
+        self.clicks.append(selector)
+
+    def wait_for_timeout(self, delay_ms: int) -> None:
+        return None
+
+
+class _FakePostLoginSelectorPage:
+    url = "https://fxg.jinritemai.com/login/common"
+
+    def __init__(self) -> None:
+        self.waited_selectors: list[str] = []
+
+    def wait_for_selector(self, selector: str, timeout: int = 0) -> None:
+        self.waited_selectors.append(selector)
+        if selector == "text=请选择店铺":
+            return
+        raise RuntimeError(f"not found: {selector}")
+
+    def locator(self, _selector: str):
+        class _First:
+            def inner_text(self, timeout: int = 0) -> str:
+                return "请选择店铺 博宽数娱"
+
+            def is_visible(self, timeout: int = 0) -> bool:
+                return False
+
+        class _Locator:
+            first = _First()
+
+        return _Locator()
+
+    def content(self) -> str:
+        return "请选择店铺 博宽数娱"
+
+
+class _FakeLoginAlreadyAtShopPickerPage(_FakePostLoginSelectorPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.typed: list[tuple[str, str]] = []
+
+    def locator(self, selector: str):
+        page = self
+
+        class _First:
+            def inner_text(self, timeout: int = 0) -> str:
+                return "请选择店铺 博宽数娱"
+
+            def is_visible(self, timeout: int = 0) -> bool:
+                return selector == "text=请选择店铺"
+
+            def wait_for(self, timeout: int = 0) -> None:
+                if selector == "text=请选择店铺":
+                    return
+                raise RuntimeError(f"not found: {selector}")
+
+            def input_value(self, timeout: int = 0) -> str:
+                raise RuntimeError(f"not an input: {selector}")
+
+        class _Locator:
+            first = _First()
+
+        return _Locator()
+
+    def fill(self, selector: str, value: str, timeout: int = 0) -> None:
+        self.typed.append((selector, value))
+        raise RuntimeError("login fields are not visible")
 
 
 @pytest.fixture(autouse=True)
@@ -507,3 +724,201 @@ async def test_tally_client_marks_terminal_updates_as_disconnect_retryable() -> 
         ("job_complete", {"sync_job_id": "sync-success"}, True),
         ("job_fail", {"sync_job_id": "sync-fail"}, True),
     ]
+
+
+def test_login_mode_click_prefers_playbook_selectors_before_builtin_tabs() -> None:
+    candidate = _FakeLoginModeCandidate(succeeds_for={"text=邮箱登录"})
+
+    clicked = pr._try_click_password_login_mode(
+        [candidate],
+        timeout_ms=1000,
+        login_mode_selectors=["text=邮箱登录"],
+    )
+
+    assert clicked is True
+    assert candidate.click_attempts[0] == "text=邮箱登录"
+
+
+def test_login_mode_click_runs_before_risk_detection_for_configured_selector() -> None:
+    candidate = _FakeRiskyLoginModeCandidate(
+        succeeds_for={"text=邮箱登录", "button:has-text('登录')"}
+    )
+
+    context = pr._find_login_context(
+        candidate,
+        username_selector="#username",
+        password_selector="#password",
+        submit_selector="button:has-text('登录')",
+        login_mode_selectors=["text=邮箱登录"],
+        username="user@example.com",
+        password="secret",
+        timeout_ms=1000,
+    )
+
+    assert context is candidate
+    assert candidate.click_attempts[0] == "text=邮箱登录"
+    assert "button:has-text('登录')" in candidate.click_attempts
+
+
+def test_navigate_sms_login_page_defers_to_following_login_step() -> None:
+    page = _FakeNavigateSmsLoginPage()
+
+    result = pr._execute_action(
+        page,
+        {
+            "id": "open_order_list",
+            "action": "navigate",
+            "url": "https://fxg.jinritemai.com/ffa/morder/order/list",
+        },
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=Path("/tmp"),
+        allow_auth_redirect=True,
+    )
+
+    assert result == {"auth_required": True}
+
+
+def test_login_clicks_pre_submit_selectors_before_submit() -> None:
+    candidate = _FakeLoginWithAgreementCandidate(
+        succeeds_for={"text=邮箱登录", "button:has-text('登录')"}
+    )
+
+    context = pr._find_login_context(
+        candidate,
+        username_selector="#username",
+        password_selector="#password",
+        submit_selector="button:has-text('登录')",
+        login_mode_selectors=["text=邮箱登录"],
+        pre_submit_click_selectors=["input[type=checkbox]"],
+        username="user@example.com",
+        password="secret",
+        timeout_ms=1000,
+    )
+
+    assert context is candidate
+    assert candidate.click_attempts.index("input[type=checkbox]") < candidate.click_attempts.index(
+        "button:has-text('登录')"
+    )
+
+
+def test_detects_slider_puzzle_verification_after_login_submit() -> None:
+    assert pr._detect_auth_or_risk(_FakeRiskVerificationPage()) == "RISK_VERIFICATION"
+
+
+def test_login_context_treats_slider_puzzle_as_risk_verification() -> None:
+    run_config = pr.PlaywrightRunConfig(
+        profile_root="/tmp/profiles",
+        download_root="/tmp/downloads",
+        headless=True,
+        timezone_id="Asia/Shanghai",
+        browser_channel="chrome",
+        risk_manual_timeout_ms=1,
+    )
+
+    with pytest.raises(pr.BrowserActionError) as exc_info:
+        pr._find_login_context(
+            _FakeRiskVerificationPage(),
+            username_selector="#username",
+            password_selector="#password",
+            submit_selector="button:has-text('登录')",
+            username="user@example.com",
+            password="secret",
+            timeout_ms=1000,
+            run_config=run_config,
+        )
+
+    assert exc_info.value.fail_reason == "RISK_VERIFICATION"
+
+
+def test_click_if_present_clicks_visible_selector() -> None:
+    page = _FakeOptionalClickPage(visible=True)
+
+    result = pr._execute_action(
+        page,
+        {"id": "select_shop_if_present", "action": "click_if_present", "selector": "text=博宽数娱"},
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=Path("/tmp"),
+    )
+
+    assert result == {}
+    assert page.clicks == ["text=博宽数娱"]
+
+
+def test_click_if_present_skips_missing_selector() -> None:
+    page = _FakeOptionalClickPage(visible=False)
+
+    result = pr._execute_action(
+        page,
+        {"id": "select_shop_if_present", "action": "click_if_present", "selector": "text=博宽数娱"},
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=Path("/tmp"),
+    )
+
+    assert result == {"skipped": True}
+    assert page.clicks == []
+
+
+def test_click_if_present_tries_split_selector_candidates() -> None:
+    page = _FakeOptionalClickPage(visible=False, visible_selectors={"text=博宽数娱"})
+
+    result = pr._execute_action(
+        page,
+        {
+            "id": "select_shop_if_present",
+            "action": "click_if_present",
+            "selector": "[class*='index_roleItem']:has-text('博宽数娱'), text=博宽数娱",
+        },
+        params={},
+        extracted={},
+        capture_files=[],
+        download_dir=Path("/tmp"),
+    )
+
+    assert result == {}
+    assert page.clicks == ["text=博宽数娱"]
+
+
+def test_playbook_validator_accepts_optional_click_action() -> None:
+    validate_step_actions([{"id": "select_shop_if_present", "action": "click_if_present"}])
+
+
+def test_post_login_selector_splits_mixed_selector_candidates() -> None:
+    page = _FakePostLoginSelectorPage()
+
+    pr._wait_for_post_login_selector(
+        page,
+        login_context=page,
+        selector=".auxo-btn-dashed, .auxo-pagination-next, text=请选择店铺",
+        timeout_ms=1000,
+    )
+
+    assert "text=请选择店铺" in page.waited_selectors
+
+
+def test_login_if_needed_returns_when_shop_picker_is_already_ready() -> None:
+    page = _FakeLoginAlreadyAtShopPickerPage()
+
+    pr._execute_login_action(
+        page,
+        {
+            "id": "login_if_needed",
+            "action": "login_if_needed",
+            "username_selector": 'input[name="email"]',
+            "password_selector": 'input[name="password"]',
+            "submit_selector": 'button:has-text("登录")',
+            "username_value": "merchant@example.com",
+            "password_value": "secret",
+            "post_login_wait_selector": ".auxo-btn-dashed, .auxo-pagination-next, text=请选择店铺",
+        },
+        params={},
+        extracted={},
+        timeout_ms=1000,
+    )
+
+    assert page.typed == []

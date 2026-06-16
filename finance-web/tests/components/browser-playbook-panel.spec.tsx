@@ -449,6 +449,45 @@ describe('BrowserPlaybookPanel', () => {
     await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
   });
 
+  it('填密码弹窗回显已保存的登录名而不是按标题现算的默认值', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/data-sources/source-1/browser-playbook/detail?record_limit=1') {
+        return jsonResponse({
+          success: true,
+          credential: { username: '博宽网游财务ai', password_saved: true },
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<BrowserPlaybookPanel authToken="token-1" sources={sources} />);
+    fireEvent.click(screen.getByRole('button', { name: /填密码 千牛每日资金账单/ }));
+
+    const dialog = await screen.findByRole('dialog', { name: '填写浏览器任务密码' });
+    await waitFor(() =>
+      expect((within(dialog).getByLabelText('登录账号') as HTMLInputElement).value).toBe('博宽网游财务ai'),
+    );
+  });
+
+  it('填密码弹窗在无已存凭证时回退到按标题现算的默认登录名', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/data-sources/source-1/browser-playbook/detail?record_limit=1') {
+        return jsonResponse({ success: true, credential: {} });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<BrowserPlaybookPanel authToken="token-1" sources={sources} />);
+    fireEvent.click(screen.getByRole('button', { name: /填密码 千牛每日资金账单/ }));
+
+    const dialog = await screen.findByRole('dialog', { name: '填写浏览器任务密码' });
+    expect((within(dialog).getByLabelText('登录账号') as HTMLInputElement).value).toBe(
+      '千牛每日资金账单:ai财务',
+    );
+  });
+
   it('更新浏览器任务密码时只提交凭证且不回显密码', async () => {
     const onRegistered = vi.fn();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {

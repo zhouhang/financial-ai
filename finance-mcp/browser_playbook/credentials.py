@@ -98,11 +98,13 @@ def update_browser_playbook_credential(
                 # Derive the per-login profile ref from (playbook login domain + username) so that
                 # tasks sharing one account (same username on the same platform) collapse onto one
                 # Chrome profile/session. Computed here because this is the first point the username
-                # is known. Only filled when runtime_profile_ref is currently empty, so legacy
-                # hand-aligned bindings keep their existing value.
+                # is known. Write it when the ref is empty OR when the username changed and the
+                # stored ref is exactly the *old* username's auto-derived value — so correcting a
+                # wrong username re-derives a matching ref (and same-account tasks re-share) without
+                # ever clobbering a hand-customized ref or churning on an unchanged username.
                 cur.execute(
                     """
-                    SELECT p.playbook_body
+                    SELECT p.playbook_body, srb.credential_ref AS old_credential_ref
                     FROM shop_runtime_bindings srb
                     JOIN playbooks p
                       ON p.company_id = srb.company_id AND p.playbook_id = srb.playbook_id
@@ -112,10 +114,24 @@ def update_browser_playbook_credential(
                     """,
                     (company_id, data_source_id),
                 )
-                pb_row = cur.fetchone()
-                playbook_body = dict((pb_row or {}).get("playbook_body") or {})
+                pb_row = cur.fetchone() or {}
+                playbook_body = dict(pb_row.get("playbook_body") or {})
                 computed_profile_ref = browser_login_profile_ref(
                     playbook_body=playbook_body, username=username
+                )
+                old_username = ""
+                old_ref_value = str(pb_row.get("old_credential_ref") or "")
+                if old_ref_value:
+                    try:
+                        old_username = str(
+                            (auth_db._open_json_payload(old_ref_value) or {}).get("username") or ""  # noqa: SLF001
+                        ).strip()
+                    except Exception:
+                        old_username = ""
+                old_profile_ref = (
+                    browser_login_profile_ref(playbook_body=playbook_body, username=old_username)
+                    if old_username
+                    else ""
                 )
                 cur.execute(
                     """
@@ -126,6 +142,7 @@ def update_browser_playbook_credential(
                         cron_pause_reason = NULL,
                         runtime_profile_ref = CASE
                             WHEN COALESCE(runtime_profile_ref, '') = '' THEN %s
+                            WHEN %s <> '' AND runtime_profile_ref = %s THEN %s
                             ELSE runtime_profile_ref
                         END,
                         updated_at = CURRENT_TIMESTAMP
@@ -135,7 +152,15 @@ def update_browser_playbook_credential(
                               agent_id, egress_group, profile_status, playbook_status,
                               cron_pause_reason, last_collection_at, updated_at, runtime_profile_ref
                     """,
-                    (credential_ref, computed_profile_ref, company_id, data_source_id),
+                    (
+                        credential_ref,
+                        computed_profile_ref,
+                        old_profile_ref,
+                        old_profile_ref,
+                        computed_profile_ref,
+                        company_id,
+                        data_source_id,
+                    ),
                 )
                 row = cur.fetchone()
                 conn.commit()

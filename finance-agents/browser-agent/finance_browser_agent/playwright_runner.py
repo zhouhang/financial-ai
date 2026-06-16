@@ -70,8 +70,12 @@ _AUTH_REDIRECT_MARKERS = (
 )
 _RISK_MARKERS = (
     "验证码",
+    "请完成下列验证",
     "滑块",
     "拖动滑块",
+    "拖动完成",
+    "拖动完成上方拼图",
+    "完成拼图",
     "滑动验证",
     "向右滑动验证",
     "安全校验",
@@ -83,8 +87,12 @@ _RISK_MARKERS = (
     "risk",
 )
 _STRONG_RISK_MARKERS = (
+    "请完成下列验证",
     "滑块",
     "拖动滑块",
+    "拖动完成",
+    "拖动完成上方拼图",
+    "完成拼图",
     "滑动验证",
     "向右滑动验证",
     "安全校验",
@@ -403,14 +411,32 @@ def _ready_selectors(action: dict[str, Any]) -> list[str]:
 
 def _page_has_ready_selector(page: Any, selectors: list[str], *, timeout_ms: int) -> bool:
     for selector in selectors:
-        try:
-            page.wait_for_selector(selector, timeout=timeout_ms)
-            return True
-        except Exception:
-            locator = _safe_first_locator(page, selector)
-            if locator is not None and _locator_visible(locator, timeout_ms=timeout_ms):
+        candidates = _selector_candidates(selector)
+        per_selector_timeout_ms = max(1, int(timeout_ms / max(1, len(candidates))))
+        for candidate_selector in candidates:
+            try:
+                page.wait_for_selector(candidate_selector, timeout=per_selector_timeout_ms)
                 return True
+            except Exception:
+                locator = _safe_first_locator(page, candidate_selector)
+                if locator is not None and _locator_visible(locator, timeout_ms=per_selector_timeout_ms):
+                    return True
     return False
+
+
+def _selector_candidates(selector: str) -> list[str]:
+    raw = str(selector or "").strip()
+    if not raw:
+        return []
+    candidates = [raw]
+    candidates.extend(part.strip() for part in raw.split(",") if part.strip())
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if item not in seen:
+            deduped.append(item)
+            seen.add(item)
+    return deduped
 
 
 def _configured_page_state(page: Any, action: dict[str, Any]) -> str | None:
@@ -592,7 +618,7 @@ def _execute_action(
     if name == "navigate":
         page.goto(str(action.get("url") or ""), wait_until="load", timeout=timeout_ms)
         detected = _detect_auth_or_risk(page)
-        if detected == "AUTH_EXPIRED" and allow_auth_redirect:
+        if detected in {"AUTH_EXPIRED", "RISK_VERIFICATION"} and allow_auth_redirect:
             return {"auth_required": True}
         if detected == "AUTH_EXPIRED":
             auth_redirect_grace_ms = int(action.get("auth_redirect_grace_ms") or 15000)
@@ -620,6 +646,29 @@ def _execute_action(
         _click_like_human(
             page,
             selector,
+            timeout_ms=timeout_ms,
+            run_config=run_config,
+            overlays=overlays,
+        )
+        return {}
+    if name == "click_if_present":
+        visible_timeout_ms = int(action.get("visible_timeout_ms") or min(timeout_ms, 1000))
+        selected_selector = ""
+        for candidate_selector in _selector_candidates(selector):
+            locator = _safe_first_locator(page, candidate_selector)
+            if locator is not None and _locator_visible(locator, timeout_ms=visible_timeout_ms):
+                selected_selector = candidate_selector
+                break
+        if not selected_selector:
+            logger.info(
+                "browser optional click skipped: step_id=%s selector=%s",
+                step_id or "<unnamed>",
+                selector,
+            )
+            return {"skipped": True}
+        _click_like_human(
+            page,
+            selected_selector,
             timeout_ms=timeout_ms,
             run_config=run_config,
             overlays=overlays,
@@ -850,11 +899,15 @@ def _execute_login_action(
             "login action missing resolved username or password",
         )
 
+    post_login_wait_selector = str(action.get("post_login_wait_selector") or "").strip()
     login_context = _find_login_context(
         page,
         username_selector=username_selector,
         password_selector=password_selector,
         submit_selector=submit_selector,
+        post_login_wait_selector=post_login_wait_selector,
+        login_mode_selectors=_string_items(action.get("login_mode_selectors")),
+        pre_submit_click_selectors=_string_items(action.get("pre_submit_click_selectors")),
         username=username,
         password=password,
         timeout_ms=timeout_ms,
@@ -865,7 +918,6 @@ def _execute_login_action(
         handoff_event_loop=handoff_event_loop,
         chrome=chrome,
     )
-    post_login_wait_selector = str(action.get("post_login_wait_selector") or "").strip()
     wait_for_post_login_selector = action.get("wait_for_post_login_selector")
     if wait_for_post_login_selector is None:
         wait_for_post_login_selector = True
@@ -890,6 +942,9 @@ def _find_login_context(
     username_selector: str,
     password_selector: str,
     submit_selector: str,
+    post_login_wait_selector: str = "",
+    login_mode_selectors: list[str] | None = None,
+    pre_submit_click_selectors: list[str] | None = None,
     username: str,
     password: str,
     timeout_ms: int,
@@ -906,7 +961,44 @@ def _find_login_context(
     risk_deadline: float | None = None
     deadline = time.monotonic() + (max(timeout_ms, attempt_timeout_ms) / 1000)
     while time.monotonic() <= deadline:
+        if post_login_wait_selector and _page_has_ready_selector(
+            page,
+            _string_items(post_login_wait_selector),
+            timeout_ms=attempt_timeout_ms,
+        ):
+            logger.info(
+                "browser login fields skipped because post-login selector is ready: selector=%s url=%s",
+                post_login_wait_selector,
+                _page_url(page),
+            )
+            return page
         candidates = _login_candidates(page)
+        if login_mode_selectors and not password_mode_clicked:
+            password_mode_clicked = _try_click_password_login_mode(
+                candidates,
+                timeout_ms=attempt_timeout_ms,
+                login_mode_selectors=login_mode_selectors,
+                include_builtin_selectors=False,
+            )
+            if password_mode_clicked:
+                _wait_for_timeout(page, min(1000, attempt_timeout_ms))
+                continue
+        risk_deadline, handled_risk = _handle_login_risk_verification(
+            page,
+            candidates,
+            run_config=run_config,
+            sync_job_id=sync_job_id,
+            handoff_coordinator=handoff_coordinator,
+            backend_factory=backend_factory,
+            handoff_event_loop=handoff_event_loop,
+            chrome=chrome,
+            risk_deadline=risk_deadline,
+            overall_deadline=deadline,
+        )
+        if risk_deadline is not None:
+            deadline = max(deadline, risk_deadline)
+        if handled_risk:
+            continue
         for candidate in candidates:
             try:
                 controls_ready = _ensure_login_controls_ready(
@@ -943,6 +1035,12 @@ def _find_login_context(
                         "AUTH_EXPIRED",
                         "login input did not finish before submit",
                     )
+                _click_pre_submit_controls(
+                    candidate,
+                    pre_submit_click_selectors,
+                    timeout_ms=interaction_timeout_ms,
+                    run_config=run_config,
+                )
                 _click_like_human(
                     candidate,
                     submit_selector,
@@ -954,42 +1052,57 @@ def _find_login_context(
                 if isinstance(exc, BrowserActionError) and "input did not finish" in str(exc):
                     raise exc
                 last_error = exc
-        detected_states = [_detect_auth_or_risk(candidate) for candidate in candidates]
-        if "RISK_VERIFICATION" in detected_states:
-            manual_timeout_ms = int(run_config.risk_manual_timeout_ms if run_config else 0)
-            if manual_timeout_ms <= 0:
-                raise BrowserActionError("RISK_VERIFICATION", "login page requires risk verification")
-            now = time.monotonic()
-            if risk_deadline is None:
-                risk_deadline = now + manual_timeout_ms / 1000
-                deadline = max(deadline, risk_deadline)
-                logger.warning(
-                    "browser login risk verification waiting for manual completion: timeout_ms=%s",
-                    manual_timeout_ms,
-                )
-                _notify_risk_waiting()
-            if now <= risk_deadline:
-                risk_cleared = _wait_for_risk_to_clear_with_handoff(
+                risk_deadline, handled_risk = _handle_login_risk_verification(
                     page,
-                    candidates,
-                    timeout_ms=int(max(1, (risk_deadline - now) * 1000)),
-                    poll_interval_ms=1000,
+                    _login_candidates(page),
+                    run_config=run_config,
                     sync_job_id=sync_job_id,
-                    coordinator=handoff_coordinator,
+                    handoff_coordinator=handoff_coordinator,
                     backend_factory=backend_factory,
                     handoff_event_loop=handoff_event_loop,
                     chrome=chrome,
+                    risk_deadline=risk_deadline,
+                    overall_deadline=deadline,
                 )
-                if risk_cleared:
-                    continue
-            raise BrowserActionError(
-                "RISK_VERIFICATION",
-                "login page risk verification was not completed",
-            )
+                if risk_deadline is not None:
+                    deadline = max(deadline, risk_deadline)
+                if handled_risk:
+                    break
+                if post_login_wait_selector and _page_has_ready_selector(
+                    page,
+                    _string_items(post_login_wait_selector),
+                    timeout_ms=attempt_timeout_ms,
+                ):
+                    logger.info(
+                        "browser login fields skipped after failed input lookup because "
+                        "post-login selector is ready: selector=%s url=%s",
+                        post_login_wait_selector,
+                        _page_url(page),
+                    )
+                    return page
+        if handled_risk:
+            continue
+        risk_deadline, handled_risk = _handle_login_risk_verification(
+            page,
+            _login_candidates(page),
+            run_config=run_config,
+            sync_job_id=sync_job_id,
+            handoff_coordinator=handoff_coordinator,
+            backend_factory=backend_factory,
+            handoff_event_loop=handoff_event_loop,
+            chrome=chrome,
+            risk_deadline=risk_deadline,
+            overall_deadline=deadline,
+        )
+        if risk_deadline is not None:
+            deadline = max(deadline, risk_deadline)
+        if handled_risk:
+            continue
         if not password_mode_clicked:
             password_mode_clicked = _try_click_password_login_mode(
                 candidates,
                 timeout_ms=attempt_timeout_ms,
+                login_mode_selectors=login_mode_selectors,
             )
         _wait_for_timeout(page, min(1000, attempt_timeout_ms))
     raise BrowserActionError(
@@ -998,19 +1111,98 @@ def _find_login_context(
     )
 
 
+def _handle_login_risk_verification(
+    page: Any,
+    candidates: list[Any],
+    *,
+    run_config: PlaywrightRunConfig | None,
+    sync_job_id: str,
+    handoff_coordinator: RemoteControlCoordinator | None,
+    backend_factory: Any,
+    handoff_event_loop: Any,
+    chrome: Any,
+    risk_deadline: float | None,
+    overall_deadline: float,
+) -> tuple[float | None, bool]:
+    detected_states = [_detect_auth_or_risk(candidate) for candidate in candidates]
+    if "RISK_VERIFICATION" not in detected_states:
+        return risk_deadline, False
+
+    manual_timeout_ms = int(run_config.risk_manual_timeout_ms if run_config else 0)
+    if manual_timeout_ms <= 0:
+        raise BrowserActionError("RISK_VERIFICATION", "login page requires risk verification")
+    now = time.monotonic()
+    if risk_deadline is None:
+        risk_deadline = max(overall_deadline, now + manual_timeout_ms / 1000)
+        logger.warning(
+            "browser login risk verification waiting for manual completion: timeout_ms=%s",
+            manual_timeout_ms,
+        )
+        _notify_risk_waiting()
+    if now <= risk_deadline:
+        risk_cleared = _wait_for_risk_to_clear_with_handoff(
+            page,
+            candidates,
+            timeout_ms=int(max(1, (risk_deadline - now) * 1000)),
+            poll_interval_ms=1000,
+            sync_job_id=sync_job_id,
+            coordinator=handoff_coordinator,
+            backend_factory=backend_factory,
+            handoff_event_loop=handoff_event_loop,
+            chrome=chrome,
+        )
+        if risk_cleared:
+            return risk_deadline, True
+    raise BrowserActionError(
+        "RISK_VERIFICATION",
+        "login page risk verification was not completed",
+    )
+
+
 def _login_candidates(page: Any) -> list[Any]:
     return [page, *list(getattr(page, "frames", []) or [])]
 
 
-def _try_click_password_login_mode(candidates: list[Any], *, timeout_ms: int) -> bool:
+def _try_click_password_login_mode(
+    candidates: list[Any],
+    *,
+    timeout_ms: int,
+    login_mode_selectors: list[str] | None = None,
+    include_builtin_selectors: bool = True,
+) -> bool:
+    builtin_selectors = _DEFAULT_PASSWORD_LOGIN_SELECTORS if include_builtin_selectors else ()
+    selectors = [
+        selector.strip()
+        for selector in [*(login_mode_selectors or []), *builtin_selectors]
+        if str(selector or "").strip()
+    ]
     for candidate in candidates:
-        for selector in _DEFAULT_PASSWORD_LOGIN_SELECTORS:
+        for selector in selectors:
             try:
                 candidate.click(selector, timeout=timeout_ms)
                 return True
             except Exception:
                 continue
     return False
+
+
+def _click_pre_submit_controls(
+    context: Any,
+    selectors: list[str] | None,
+    *,
+    timeout_ms: int,
+    run_config: PlaywrightRunConfig | None,
+) -> None:
+    for selector in selectors or []:
+        try:
+            _click_like_human(
+                context,
+                selector,
+                timeout_ms=timeout_ms,
+                run_config=run_config,
+            )
+        except Exception as exc:
+            logger.info("browser login pre-submit click skipped: selector=%s error=%s", selector, exc)
 
 
 def _ensure_login_controls_ready(
@@ -1569,6 +1761,84 @@ _CALENDAR_PICK_JS = """
 }
 """
 
+# Opens the Nth (0=start, 1=end) time input inside the open RangePicker dropdown so the
+# hh/mm/ss option lists render.
+_CALENDAR_OPEN_TIME_JS = """
+(index) => {
+  const panel = document.querySelector("[class*='RPR_outerPickerWrapper'],[class*='PP_dropdownMain']");
+  if (!panel) return {ok: false, reason: 'no_picker_panel'};
+  const inputs = Array.from(panel.querySelectorAll('input'))
+    .filter(i => (i.getAttribute('placeholder') || '').includes('时间'));
+  const input = inputs[index];
+  if (!input) return {ok: false, reason: 'no_time_input_' + index};
+  ['mousedown', 'mouseup', 'click'].forEach(t =>
+    input.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
+  return {ok: true};
+}
+"""
+
+# Clicks hh/mm/ss options in the currently-visible time-picker lists, then returns the value
+# of the time input at `index`.
+_CALENDAR_PICK_TIME_JS = """
+(args) => {
+  const {index, hh, mm, ss} = args;
+  const fire = (el) => ['mousedown', 'mouseup', 'click'].forEach(t =>
+    el.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
+  const pick = (listTestid, val) => {
+    const uls = Array.from(document.querySelectorAll("[data-testid='" + listTestid + "']"))
+      .filter(u => u.offsetWidth > 0 && u.offsetHeight > 0);
+    const ul = uls[uls.length - 1];
+    if (!ul) return false;
+    const li = Array.from(ul.querySelectorAll('li')).find(e => (e.textContent || '').trim() === val);
+    if (!li) return false;
+    li.scrollIntoView({block: 'center'});
+    fire(li);
+    return true;
+  };
+  const okh = pick('beast-core-timePicker-list-hh', hh);
+  const okm = pick('beast-core-timePicker-list-mm', mm);
+  const oks = pick('beast-core-timePicker-list-ss', ss);
+  const panel = document.querySelector("[class*='RPR_outerPickerWrapper'],[class*='PP_dropdownMain']");
+  const inputs = panel ? Array.from(panel.querySelectorAll('input'))
+    .filter(i => (i.getAttribute('placeholder') || '').includes('时间')) : [];
+  return {ok: okh && okm && oks, okh, okm, oks, value: inputs[index] ? inputs[index].value : null};
+}
+"""
+
+
+def _set_calendar_range_times(
+    page: Any,
+    *,
+    start_time: str,
+    end_time: str,
+    timeout_ms: int,
+) -> None:
+    """Set start/end times in an open date-time RangePicker (readonly time inputs + hh/mm/ss lists).
+
+    The day-cell click leaves both times at the current clock time, yielding a zero-width range
+    that filters out the whole day's rows. Selecting e.g. 00:00:00 ~ 23:59:59 captures the full day.
+    """
+    for index, value in ((0, start_time), (1, end_time)):
+        value = str(value or "").strip()
+        if not value:
+            continue
+        match = re.match(r"^(\d{1,2}):(\d{1,2}):(\d{1,2})$", value)
+        if not match:
+            raise BrowserActionError("PAGE_CHANGED", f"calendar time value invalid: {value}")
+        hh, mm, ss = (f"{int(group):02d}" for group in match.groups())
+        opened = page.evaluate(_CALENDAR_OPEN_TIME_JS, index)
+        if not isinstance(opened, dict) or not opened.get("ok"):
+            raise BrowserActionError("PAGE_CHANGED", f"calendar time input open failed ({value}): {opened}")
+        page.wait_for_timeout(400)
+        result = page.evaluate(_CALENDAR_PICK_TIME_JS, {"index": index, "hh": hh, "mm": mm, "ss": ss})
+        if not isinstance(result, dict) or not result.get("ok"):
+            raise BrowserActionError("PAGE_CHANGED", f"calendar time pick failed ({value}): {result}")
+        if str(result.get("value") or "") != value:
+            raise BrowserActionError(
+                "PAGE_CHANGED", f"calendar time not applied ({value}): got {result.get('value')}"
+            )
+        page.wait_for_timeout(250)
+
 
 def _calendar_visible_year_months(page: Any, header_selector: str) -> list[tuple[int, int]]:
     """Return the (year, month) of each visible calendar panel header, e.g. '2026年6月'."""
@@ -1618,37 +1888,56 @@ def _set_range_calendar_day(
     next_month_selector = str(
         action.get("next_month_selector") or '[class*="RPR_iconPrevNext"][class*="RPR_right"]'
     )
+    end_selector = str(action.get("end_selector") or "").strip()
     confirm_selector = str(action.get("confirm_selector") or "").strip()
+    start_time = str(action.get("start_time") or "").strip()
+    end_time = str(action.get("end_time") or "").strip()
 
-    _dismiss_configured_overlays(page, overlays)
-    _dismiss_overlays_and_retry_once(
-        page, overlays, lambda: page.locator(selector).first.click(timeout=timeout_ms)
-    )
-    page.wait_for_timeout(400)
-
-    # Navigate month panels until biz_date's month is visible. The picker shows two adjacent
-    # months; click prev when the target is earlier than what's shown, next when later.
     target_index = year * 12 + month
-    for _ in range(60):
-        visible = _calendar_visible_year_months(page, header_selector)
-        if not visible:
-            break
-        indices = [y * 12 + m for (y, m) in visible]
-        if target_index in indices:
-            break
-        nav_selector = prev_month_selector if target_index < min(indices) else next_month_selector
-        try:
-            page.locator(nav_selector).first.click(timeout=timeout_ms)
-        except Exception as exc:
-            raise BrowserActionError(
-                "PAGE_CHANGED",
-                f"calendar month navigation failed for {value} (visible={visible}): {exc}",
-            )
-        page.wait_for_timeout(250)
-    else:
+
+    def open_calendar(open_selector: str) -> None:
+        # A stray popup can intercept the click and the panel may render slowly, so dismiss
+        # overlays, click, then poll for month-panel headers.
+        for _ in range(5):
+            _dismiss_configured_overlays(page, overlays)
+            try:
+                _dismiss_overlays_and_retry_once(
+                    page, overlays, lambda: page.locator(open_selector).first.click(timeout=timeout_ms)
+                )
+            except Exception as exc:
+                logger.info("browser calendar open click retry: %s", exc)
+            for _ in range(10):
+                page.wait_for_timeout(300)
+                if _calendar_visible_year_months(page, header_selector):
+                    return
+        raise BrowserActionError(
+            "PAGE_CHANGED", f"calendar did not open for {value}: selector={open_selector}"
+        )
+
+    def navigate_to_target_month() -> None:
+        # The picker may show two adjacent months; click prev/next until biz_date's month is visible.
+        for _ in range(60):
+            visible = _calendar_visible_year_months(page, header_selector)
+            if not visible:
+                break
+            indices = [y * 12 + m for (y, m) in visible]
+            if target_index in indices:
+                return
+            nav_selector = prev_month_selector if target_index < min(indices) else next_month_selector
+            try:
+                page.locator(nav_selector).first.click(timeout=timeout_ms)
+            except Exception as exc:
+                raise BrowserActionError(
+                    "PAGE_CHANGED",
+                    f"calendar month navigation failed for {value} (visible={visible}): {exc}",
+                )
+            page.wait_for_timeout(250)
         raise BrowserActionError(
             "PAGE_CHANGED", f"calendar could not navigate to month of {value}"
         )
+
+    open_calendar(selector)
+    navigate_to_target_month()
 
     js_args = {
         "headerSel": header_selector,
@@ -1660,12 +1949,26 @@ def _set_range_calendar_day(
     # First click sets the range start; the second sets the range end (same day).
     for position in ("start", "end"):
         result = page.evaluate(_CALENDAR_PICK_JS, js_args)
+        if (
+            position == "end"
+            and end_selector
+            and isinstance(result, dict)
+            and result.get("reason") == "header_not_found"
+        ):
+            open_calendar(end_selector)
+            navigate_to_target_month()
+            result = page.evaluate(_CALENDAR_PICK_JS, js_args)
         if not isinstance(result, dict) or not result.get("ok"):
             raise BrowserActionError(
                 "PAGE_CHANGED",
                 f"calendar {position} day not found for {value}: {result}",
             )
         page.wait_for_timeout(250)
+
+    if start_time or end_time:
+        _set_calendar_range_times(
+            page, start_time=start_time, end_time=end_time, timeout_ms=timeout_ms
+        )
 
     if confirm_selector:
         try:
@@ -1814,6 +2117,7 @@ def _wait_for_post_login_selector(
     contexts = [login_context]
     if page is not login_context:
         contexts.append(page)
+    selectors = _selector_candidates(selector)
     last_error: Exception | None = None
     last_detected: str | None = None
     risk_detected = False
@@ -1875,11 +2179,16 @@ def _wait_for_post_login_selector(
                         )
         for context in contexts:
             remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
-            try:
-                context.wait_for_selector(selector, timeout=min(remaining_ms, 2000))
-                return
-            except Exception as exc:
-                last_error = exc
+            per_selector_timeout_ms = min(remaining_ms, max(1, int(2000 / max(1, len(selectors)))))
+            for candidate_selector in selectors:
+                try:
+                    context.wait_for_selector(candidate_selector, timeout=per_selector_timeout_ms)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    locator = _safe_first_locator(context, candidate_selector)
+                    if locator is not None and _locator_visible(locator, timeout_ms=per_selector_timeout_ms):
+                        return
     if risk_detected:
         raise BrowserActionError("RISK_VERIFICATION", f"post-login risk verification not completed: {last_error}")
     if auth_handoff_detected:
@@ -1948,10 +2257,14 @@ def _history_row_matches_target_date(row_text: str, target_date: str) -> bool:
         compact_text,
         maxsplit=1,
     )[0]
+    # The date may be followed by a clock time before the range separator, e.g.
+    # "2026-06-14 00:00:00 ~ 2026-06-14 23:59:59" — allow an optional " HH:MM(:SS)" after each date.
     date_range_matches = re.findall(
-        r"(?<!\d)(20\d{2}[-/.]\d{2}[-/.]\d{2}|20\d{6}|\d{1,2}[-/.]\d{1,2})(?!\d)\s*"
+        r"(?<!\d)(20\d{2}[-/.]\d{2}[-/.]\d{2}|20\d{6}|\d{1,2}[-/.]\d{1,2})(?!\d)"
+        r"(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?\s*"
         r"(?:~|至|到|_|—|–|\s-\s)\s*"
-        r"(?<!\d)(20\d{2}[-/.]\d{2}[-/.]\d{2}|20\d{6}|\d{1,2}[-/.]\d{1,2})(?!\d)",
+        r"(?<!\d)(20\d{2}[-/.]\d{2}[-/.]\d{2}|20\d{6}|\d{1,2}[-/.]\d{1,2})(?!\d)"
+        r"(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?",
         business_text,
     )
     for start, end in date_range_matches:
@@ -2500,8 +2813,17 @@ def _download_history_file(
     )
     history_refresh_interval_ms = max(0, int(action.get("history_refresh_interval_ms") or 5000))
     target_date = _resolve_value(action, params, extracted)
+    # match_mode "latest_today": these export tasks have no concurrency, so instead of strictly
+    # matching the order-time-range date (brittle: ranges carry HH:MM(:SS) and vary by page),
+    # just grab the newest completed task generated today. The freshly generated report is the
+    # newest row whose text carries today's date.
+    match_mode = str(action.get("history_match_mode") or "").strip()
+    today_tokens = {
+        datetime.now().strftime("%Y-%m-%d"),
+        datetime.now().strftime("%Y/%m/%d"),
+    }
     tokens = _date_tokens(target_date)
-    if not history_row_selectors or not tokens:
+    if not history_row_selectors or (match_mode != "latest_today" and not tokens):
         raise BrowserActionError("PAGE_CHANGED", "download_history_file requires selector and target date")
     if not status_text or not download_selector:
         raise BrowserActionError(
@@ -2538,8 +2860,20 @@ def _download_history_file(
         for row_selector in history_row_selectors:
             rows = page.locator(row_selector)
             for index, compact_text in _locator_text_rows(rows, timeout_ms=timeout_ms):
-                matches_date = _history_row_matches_target_date(compact_text, str(target_date))
                 matches_status = status_text in compact_text
+                if match_mode == "latest_today":
+                    # Rows are listed newest-first, so the first completed row carrying today's
+                    # date is the report we just generated (no concurrency).
+                    if matches_status and any(tok in compact_text for tok in today_tokens):
+                        logger.info(
+                            "browser history latest-today row matched: selector=%s row=%s text=%s",
+                            row_selector,
+                            index,
+                            compact_text[:500],
+                        )
+                        return rows.nth(index)
+                    continue
+                matches_date = _history_row_matches_target_date(compact_text, str(target_date))
                 if matches_date and matches_status:
                     logger.info(
                         "browser history row matched for download: target_date=%s selector=%s row=%s "
@@ -2601,13 +2935,35 @@ def _download_history_file(
     if row is None:
         raise BrowserActionError("PAGE_CHANGED", f"history download row not completed for {target_date}")
 
+    # The 新消息 (ImportantList) popup can cover the download button and even re-appear after a
+    # dismiss. With a long action timeout a covered click would hang waiting for actionability, so
+    # dismiss overlays and click with a short per-attempt timeout, retrying so a re-shown popup is
+    # cleared before the next attempt.
+    click_timeout_ms = min(timeout_ms, int(action.get("history_download_click_timeout_ms") or 8000))
+    # In latest_today mode the matched "row" may be a container holding several reports' download
+    # buttons (the row markup uses unstable styled-component classes), so click the page's first
+    # (newest, top-listed) download button instead of scoping to the matched container.
+    download_target = (
+        page.locator(download_selector).first
+        if match_mode == "latest_today"
+        else row.locator(download_selector)
+    )
+    last_exc: Exception | None = None
     with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
-        _dismiss_configured_overlays(page, overlays)
-        _dismiss_overlays_and_retry_once(
-            page,
-            overlays,
-            lambda: row.locator(download_selector).click(timeout=timeout_ms),
-        )
+        clicked = False
+        for _ in range(6):
+            _dismiss_configured_overlays(page, overlays)
+            try:
+                download_target.click(timeout=click_timeout_ms)
+                clicked = True
+                break
+            except Exception as exc:
+                last_exc = exc
+                page.wait_for_timeout(500)
+        if not clicked:
+            raise BrowserActionError(
+                "PAGE_CHANGED", f"history download click blocked (overlay covering button?): {last_exc}"
+            )
     return _save_download(
         info.value,
         download_dir=download_dir,
@@ -3083,6 +3439,7 @@ def _run_playbook_with_playwright_inner(
         amount_field=str(quality_gate.get("amount_field") or "amount"),
         date_field=str(quality_gate.get("date_field") or "biz_date"),
         biz_date=str(params.get("biz_date") or ""),
+        enforce_date=bool(quality_gate.get("enforce_date", True)),
         expected_row_count=summary_row_count if summary_step_id else params.get("expected_row_count"),
         expected_amount_total=summary_amount_total if summary_step_id else params.get("expected_amount_total"),
     )
