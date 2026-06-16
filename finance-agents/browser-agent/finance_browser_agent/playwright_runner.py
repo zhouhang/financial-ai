@@ -234,28 +234,32 @@ def should_skip_login_action(action: dict[str, Any], *, authenticated: bool) -> 
 
 
 def _detect_auth_or_risk(page: Any) -> str | None:
-    """Inspect the current page for login redirect or risk verification markers."""
-    visible_text = ""
+    """Inspect the current page for login redirect or risk verification markers.
+
+    Risk is judged from the user-VISIBLE text only. Scanning the full page HTML produced false
+    positives: vendor risk-control SDKs embed words like ``risk``/``captcha``/``verify`` in
+    scripts and markup on perfectly normal pages (JD's daily-bill page tripped on a bare
+    ``risk`` substring every navigate), wrongly flagging RISK_VERIFICATION when no challenge was
+    shown. We give inner_text a generous timeout so visible text is reliably available, and never
+    fall back to raw HTML for risk markers.
+    """
+    risk_text = ""
     try:
         locator_factory = getattr(page, "locator", None)
         if callable(locator_factory):
-            visible_text = locator_factory("body").first.inner_text(timeout=500) or ""
+            risk_text = locator_factory("body").first.inner_text(timeout=2000) or ""
     except Exception:
-        visible_text = ""
-    try:
-        body = page.content() or ""
-    except Exception:
-        body = ""
-    risk_text = visible_text or body
-    lowered = body.lower()
+        risk_text = ""
     lowered_risk_text = risk_text.lower()
-    # Risk pages often live under login/passport URLs. Prefer strong in-page risk signals
-    # so operators see the actionable cause instead of a generic auth-expired result.
-    if any(marker in risk_text or marker in lowered_risk_text for marker in _STRONG_RISK_MARKERS):
+    matched = next((marker for marker in _STRONG_RISK_MARKERS if marker in risk_text), None)
+    if matched:
+        logger.info("browser risk verification detected (visible marker=%r)", matched)
         return "RISK_VERIFICATION"
-    if ("验证码" in risk_text and any(marker in risk_text for marker in ("请输入", "获取", "发送", "手机"))) or any(
-        marker in lowered_risk_text for marker in ("captcha", "risk")
-    ):
+    if "验证码" in risk_text and any(marker in risk_text for marker in ("请输入", "获取", "发送", "手机")):
+        logger.info("browser risk verification detected (visible 验证码 prompt)")
+        return "RISK_VERIFICATION"
+    if "captcha" in lowered_risk_text:
+        logger.info("browser risk verification detected (visible captcha)")
         return "RISK_VERIFICATION"
     try:
         url = (page.url or "").lower()
@@ -263,7 +267,7 @@ def _detect_auth_or_risk(page: Any) -> str | None:
         url = ""
     if any(marker in url for marker in ("login.taobao.com", "passport")):
         return "AUTH_EXPIRED"
-    if any(marker in risk_text or marker in lowered_risk_text for marker in _AUTH_REDIRECT_MARKERS):
+    if any(marker in risk_text for marker in _AUTH_REDIRECT_MARKERS):
         return "AUTH_EXPIRED"
     return None
 
@@ -1737,27 +1741,98 @@ def _set_date_value(
 _CALENDAR_PICK_JS = """
 (args) => {
   const {headerSel, cellSel, oom, targetHeader, day} = args;
-  const headers = Array.from(document.querySelectorAll(headerSel));
-  const target = headers.find(h => (h.textContent || '').trim() === targetHeader);
-  if (!target) {
-    return {ok: false, reason: 'header_not_found', headers: headers.map(h => (h.textContent || '').trim())};
-  }
-  const hr = target.getBoundingClientRect();
-  const hx = hr.left + hr.width / 2;
-  const cells = Array.from(document.querySelectorAll(cellSel)).filter(c =>
-    (c.textContent || '').trim() === String(day) &&
-    !(c.className || '').toString().includes(oom) &&
-    c.offsetParent !== null
-  );
-  if (!cells.length) return {ok: false, reason: 'no_day_cell'};
-  // The picker shows two month panels side by side; pick the day cell whose horizontal
-  // center is closest to the target month's header — i.e. the cell in that month's panel.
-  cells.sort((a, b) => {
-    const ax = a.getBoundingClientRect(); const bx = b.getBoundingClientRect();
-    return Math.abs(ax.left + ax.width / 2 - hx) - Math.abs(bx.left + bx.width / 2 - hx);
+  const visible = (el) => {
+    if (!el) return false;
+    const cls = (el.className || '').toString().toLowerCase();
+    if (cls.includes('hidden')) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const panelSelectors = [
+    "[class*='RPR_outerPickerWrapper']",
+    "[class*='PP_dropdownMain']",
+    ".auxo-picker-dropdown",
+    ".ant-picker-dropdown",
+    "[class*='auxo-picker-dropdown']",
+    "[class*='ant-picker-dropdown']"
+  ].join(',');
+  let panels = Array.from(document.querySelectorAll(panelSelectors)).filter(visible);
+  if (!panels.length) panels = [document];
+  const panelReports = [];
+  document.querySelectorAll('[data-tally-calendar-target]').forEach(el => {
+    el.removeAttribute('data-tally-calendar-target');
   });
-  cells[0].click();
-  return {ok: true};
+  for (const panel of panels.reverse()) {
+    const headers = Array.from(panel.querySelectorAll(headerSel)).filter(visible);
+    panelReports.push(headers.map(h => (h.textContent || '').trim()));
+    const target = headers.find(h => (h.textContent || '').trim() === targetHeader);
+    if (!target) continue;
+    const hr = target.getBoundingClientRect();
+    const hx = hr.left + hr.width / 2;
+    const cells = Array.from(panel.querySelectorAll(cellSel)).filter(c =>
+      (c.textContent || '').trim() === String(day) &&
+      !(c.className || '').toString().includes(oom) &&
+      visible(c)
+    );
+    if (!cells.length) return {ok: false, reason: 'no_day_cell', headers: headers.map(h => (h.textContent || '').trim())};
+    // The picker shows two month panels side by side; pick the day cell whose horizontal
+    // center is closest to the target month's header — i.e. the cell in that month's panel.
+    cells.sort((a, b) => {
+      const ax = a.getBoundingClientRect(); const bx = b.getBoundingClientRect();
+      return Math.abs(ax.left + ax.width / 2 - hx) - Math.abs(bx.left + bx.width / 2 - hx);
+    });
+    const targetCell = cells[0];
+    const clickable = targetCell.querySelector(
+      ".auxo-picker-cell-inner,.ant-picker-cell-inner,[class*='picker-cell-inner']"
+    ) || targetCell;
+    const rect = clickable.getBoundingClientRect();
+    clickable.setAttribute('data-tally-calendar-target', '1');
+    return {
+      ok: true,
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      marker: "[data-tally-calendar-target='1']",
+      headers: headers.map(h => (h.textContent || '').trim()),
+      cellText: (targetCell.textContent || '').trim(),
+      panelClass: (panel.className || '').toString(),
+    };
+  }
+  return {ok: false, reason: 'header_not_found', panels: panelReports};
+}
+"""
+
+_CALENDAR_VISIBLE_MONTHS_JS = """
+(headerSel) => {
+  const visible = (el) => {
+    if (!el) return false;
+    const cls = (el.className || '').toString().toLowerCase();
+    if (cls.includes('hidden')) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && rect.width > 0
+      && rect.height > 0;
+  };
+  const panelSelectors = [
+    "[class*='RPR_outerPickerWrapper']",
+    "[class*='PP_dropdownMain']",
+    ".auxo-picker-dropdown",
+    ".ant-picker-dropdown",
+    "[class*='auxo-picker-dropdown']",
+    "[class*='ant-picker-dropdown']"
+  ].join(',');
+  let roots = Array.from(document.querySelectorAll(panelSelectors)).filter(visible);
+  if (!roots.length) roots = [document];
+  return roots.flatMap(root =>
+    Array.from(root.querySelectorAll(headerSel))
+      .filter(visible)
+      .map(h => (h.textContent || '').trim())
+  );
 }
 """
 
@@ -1765,15 +1840,43 @@ _CALENDAR_PICK_JS = """
 # hh/mm/ss option lists render.
 _CALENDAR_OPEN_TIME_JS = """
 (index) => {
-  const panel = document.querySelector("[class*='RPR_outerPickerWrapper'],[class*='PP_dropdownMain']");
+  const visible = (el) => {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && (el.offsetParent !== null || rect.width > 0 || rect.height > 0);
+  };
+  const panels = Array.from(document.querySelectorAll(
+    "[class*='RPR_outerPickerWrapper'],[class*='PP_dropdownMain'],"
+      + ".auxo-picker-dropdown,.ant-picker-dropdown,"
+      + "[class*='auxo-picker-dropdown'],[class*='ant-picker-dropdown']"
+  )).filter(panel => {
+    const cls = (panel.className || '').toString();
+    return !cls.includes('hidden') && visible(panel);
+  });
+  const panel = panels[panels.length - 1];
   if (!panel) return {ok: false, reason: 'no_picker_panel'};
   const inputs = Array.from(panel.querySelectorAll('input'))
-    .filter(i => (i.getAttribute('placeholder') || '').includes('时间'));
+    .filter(i => (i.getAttribute('placeholder') || '').includes('时间')
+      || (i.className || '').toString().includes('time')
+      || Boolean(i.closest("[class*='time'],[class*='Time']")));
   const input = inputs[index];
-  if (!input) return {ok: false, reason: 'no_time_input_' + index};
-  ['mousedown', 'mouseup', 'click'].forEach(t =>
-    input.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
-  return {ok: true};
+  if (input) {
+    ['mousedown', 'mouseup', 'click'].forEach(t =>
+      input.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
+    return {ok: true};
+  }
+  const columns = Array.from(panel.querySelectorAll(
+    ".auxo-picker-time-panel-column,.ant-picker-time-panel-column,[class*='picker-time-panel-column']"
+  )).filter(visible);
+  if (columns.length >= 3) return {ok: true, via: 'visible_time_columns'};
+  const hasDatePanel = Boolean(panel.querySelector(
+    ".auxo-picker-panel,.ant-picker-panel,[class*='picker-panel'],[class*='PickerPanel']"
+  ));
+  if (hasDatePanel) return {ok: true, via: 'date_only_panel'};
+  return {ok: false, reason: 'no_time_input_' + index, columns: columns.length};
 }
 """
 
@@ -1784,6 +1887,23 @@ _CALENDAR_PICK_TIME_JS = """
   const {index, hh, mm, ss} = args;
   const fire = (el) => ['mousedown', 'mouseup', 'click'].forEach(t =>
     el.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
+  const visible = (el) => {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && (el.offsetParent !== null || rect.width > 0 || rect.height > 0);
+  };
+  const panels = Array.from(document.querySelectorAll(
+    "[class*='RPR_outerPickerWrapper'],[class*='PP_dropdownMain'],"
+      + ".auxo-picker-dropdown,.ant-picker-dropdown,"
+      + "[class*='auxo-picker-dropdown'],[class*='ant-picker-dropdown']"
+  )).filter(panel => {
+    const cls = (panel.className || '').toString();
+    return !cls.includes('hidden') && visible(panel);
+  });
+  const panel = panels[panels.length - 1];
   const pick = (listTestid, val) => {
     const uls = Array.from(document.querySelectorAll("[data-testid='" + listTestid + "']"))
       .filter(u => u.offsetWidth > 0 && u.offsetHeight > 0);
@@ -1798,10 +1918,41 @@ _CALENDAR_PICK_TIME_JS = """
   const okh = pick('beast-core-timePicker-list-hh', hh);
   const okm = pick('beast-core-timePicker-list-mm', mm);
   const oks = pick('beast-core-timePicker-list-ss', ss);
-  const panel = document.querySelector("[class*='RPR_outerPickerWrapper'],[class*='PP_dropdownMain']");
   const inputs = panel ? Array.from(panel.querySelectorAll('input'))
-    .filter(i => (i.getAttribute('placeholder') || '').includes('时间')) : [];
-  return {ok: okh && okm && oks, okh, okm, oks, value: inputs[index] ? inputs[index].value : null};
+    .filter(i => (i.getAttribute('placeholder') || '').includes('时间')
+      || (i.className || '').toString().includes('time')
+      || Boolean(i.closest("[class*='time'],[class*='Time']"))) : [];
+  if (okh && okm && oks) {
+    return {ok: true, okh, okm, oks, value: inputs[index] ? inputs[index].value : null};
+  }
+
+  const columns = panel ? Array.from(panel.querySelectorAll(
+    ".auxo-picker-time-panel-column,.ant-picker-time-panel-column,[class*='picker-time-panel-column']"
+  )).filter(visible) : [];
+  const base = columns.length >= 6 ? index * 3 : 0;
+  const pickColumn = (columnIndex, val) => {
+    const column = columns[columnIndex];
+    if (!column) return false;
+    const item = Array.from(column.querySelectorAll(
+      "li,[role='option'],[class*='time-panel-cell-inner'],[class*='TimePanelCell']"
+    )).find(e => (e.textContent || '').trim() === val);
+    if (!item) return false;
+    item.scrollIntoView({block: 'center'});
+    fire(item);
+    return true;
+  };
+  const auxOkh = pickColumn(base, hh);
+  const auxOkm = pickColumn(base + 1, mm);
+  const auxOks = pickColumn(base + 2, ss);
+  const value = inputs[index] ? inputs[index].value : `${hh}:${mm}:${ss}`;
+  return {
+    ok: auxOkh && auxOkm && auxOks,
+    okh: auxOkh,
+    okm: auxOkm,
+    oks: auxOks,
+    value,
+    columns: columns.length,
+  };
 }
 """
 
@@ -1829,6 +1980,9 @@ def _set_calendar_range_times(
         opened = page.evaluate(_CALENDAR_OPEN_TIME_JS, index)
         if not isinstance(opened, dict) or not opened.get("ok"):
             raise BrowserActionError("PAGE_CHANGED", f"calendar time input open failed ({value}): {opened}")
+        if opened.get("via") == "date_only_panel":
+            logger.info("browser calendar time skipped for date-only picker: value=%s", value)
+            continue
         page.wait_for_timeout(400)
         result = page.evaluate(_CALENDAR_PICK_TIME_JS, {"index": index, "hh": hh, "mm": mm, "ss": ss})
         if not isinstance(result, dict) or not result.get("ok"):
@@ -1842,16 +1996,20 @@ def _set_calendar_range_times(
 
 def _calendar_visible_year_months(page: Any, header_selector: str) -> list[tuple[int, int]]:
     """Return the (year, month) of each visible calendar panel header, e.g. '2026年6月'."""
-    texts = page.evaluate(
-        "(sel) => Array.from(document.querySelectorAll(sel)).map(h => (h.textContent || '').trim())",
-        header_selector,
-    )
+    texts = page.evaluate(_CALENDAR_VISIBLE_MONTHS_JS, header_selector)
     months: list[tuple[int, int]] = []
     for text in texts or []:
         m = re.search(r"(\d{4})\D+(\d{1,2})", str(text))
         if m:
             months.append((int(m.group(1)), int(m.group(2))))
     return months
+
+
+def _calendar_input_contains_date(input_value: str, *, year: int, month: int, day: int) -> bool:
+    """Return true when a picker input contains the target date in common web formats."""
+    normalized = re.sub(r"\D+", "-", str(input_value or "")).strip("-")
+    expected = f"{year:04d}-{month:02d}-{day:02d}"
+    return normalized == expected or normalized.startswith(f"{expected}-")
 
 
 def _set_range_calendar_day(
@@ -1946,24 +2104,58 @@ def _set_range_calendar_day(
         "targetHeader": target_header,
         "day": day,
     }
-    # First click sets the range start; the second sets the range end (same day).
     for position in ("start", "end"):
+        if position == "end" and end_selector:
+            visible_indices = [
+                visible_year * 12 + visible_month
+                for visible_year, visible_month in _calendar_visible_year_months(
+                    page, header_selector
+                )
+            ]
+            if target_index not in visible_indices:
+                open_calendar(end_selector)
+                navigate_to_target_month()
         result = page.evaluate(_CALENDAR_PICK_JS, js_args)
-        if (
-            position == "end"
-            and end_selector
-            and isinstance(result, dict)
-            and result.get("reason") == "header_not_found"
-        ):
-            open_calendar(end_selector)
-            navigate_to_target_month()
-            result = page.evaluate(_CALENDAR_PICK_JS, js_args)
         if not isinstance(result, dict) or not result.get("ok"):
             raise BrowserActionError(
                 "PAGE_CHANGED",
                 f"calendar {position} day not found for {value}: {result}",
             )
+        x = result.get("x")
+        y = result.get("y")
+        if x is None or y is None:
+            raise BrowserActionError(
+                "PAGE_CHANGED",
+                f"calendar {position} day click point missing for {value}: {result}",
+            )
+        marker_selector = str(result.get("marker") or "").strip()
+        if marker_selector:
+            page.locator(marker_selector).first.click(timeout=min(timeout_ms, 5000))
+        else:
+            page.mouse.click(float(x), float(y))
         page.wait_for_timeout(250)
+        try:
+            debug_start_value = str(
+                page.locator(selector).first.input_value(timeout=min(timeout_ms, 1000)) or ""
+            )
+        except Exception:
+            debug_start_value = ""
+        debug_end_value = debug_start_value
+        if end_selector:
+            try:
+                debug_end_value = str(
+                    page.locator(end_selector).first.input_value(timeout=min(timeout_ms, 1000))
+                    or ""
+                )
+            except Exception:
+                debug_end_value = ""
+        logger.debug(
+            "browser calendar %s day clicked: result=%s start=%r end=%r",
+            position,
+            result,
+            debug_start_value,
+            debug_end_value,
+        )
 
     if start_time or end_time:
         _set_calendar_range_times(
@@ -1972,10 +2164,29 @@ def _set_range_calendar_day(
 
     if confirm_selector:
         try:
-            page.locator(confirm_selector).first.click(timeout=timeout_ms)
+            page.locator(confirm_selector).first.click(timeout=min(timeout_ms, 3000))
         except Exception as exc:
             logger.info("browser calendar confirm click skipped: %s", exc)
     page.wait_for_timeout(300)
+    try:
+        start_value = str(page.locator(selector).first.input_value(timeout=min(timeout_ms, 2000)) or "")
+    except Exception:
+        start_value = ""
+    end_value = start_value
+    if end_selector:
+        try:
+            end_value = str(page.locator(end_selector).first.input_value(timeout=min(timeout_ms, 2000)) or "")
+        except Exception:
+            end_value = ""
+    expected_date = f"{year:04d}-{month:02d}-{day:02d}"
+    if not _calendar_input_contains_date(
+        start_value, year=year, month=month, day=day
+    ) or not _calendar_input_contains_date(end_value, year=year, month=month, day=day):
+        raise BrowserActionError(
+            "PAGE_CHANGED",
+            "calendar range value not committed: "
+            f"expected={expected_date} start={start_value!r} end={end_value!r}",
+        )
     logger.info("browser calendar range set: selector=%s value=%s", selector, value)
 
 
@@ -2917,7 +3128,13 @@ def _download_history_file(
         _open_history()
     except Exception as exc:
         logger.info("browser history open skipped; checking current history list: %s", exc)
-    deadline = time.monotonic() + (timeout_ms / 1000)
+    # When a bill simply does not exist for the target day, the daily-bill grid just omits that
+    # row (it is not generated late), so there is nothing to wait for: with missing_row_ok we cap
+    # the search short and, if still unmatched, treat it as an empty (no-bill) success below
+    # instead of polling to timeout and failing.
+    missing_row_ok = bool(action.get("missing_row_ok"))
+    search_timeout_ms = min(timeout_ms, 8000) if missing_row_ok else timeout_ms
+    deadline = time.monotonic() + (search_timeout_ms / 1000)
     row = None
     while time.monotonic() <= deadline:
         row = _find_completed_row()
@@ -2933,6 +3150,13 @@ def _download_history_file(
             _refresh_history()
 
     if row is None:
+        if missing_row_ok:
+            logger.info(
+                "download_history_file: no matching bill row for %s; treating as empty success "
+                "(missing_row_ok=true — no bill generated for this day)",
+                target_date,
+            )
+            return {"stop_playbook": True, "rows": []}
         raise BrowserActionError("PAGE_CHANGED", f"history download row not completed for {target_date}")
 
     # The 新消息 (ImportantList) popup can cover the download button and even re-appear after a
@@ -3024,6 +3248,19 @@ def _extract_single_table_from_zip(zip_path: Path) -> Path:
         raise BrowserActionError("PAGE_CHANGED", f"downloaded file is not a valid zip: {exc}")
 
 
+def _unwrap_excel_text_guard(value: Any) -> Any:
+    """Strip the Excel text guard some exports wrap long ids in, e.g. ``="349693386401"``.
+
+    JD daily-bill csv wraps id columns (订单编号/单据编号/商品编号/商户订单号) as ``="value"`` so
+    Excel keeps them as text instead of mangling long numbers. Stored verbatim those ids would
+    not join with the order playbook's plain ids, breaking reconciliation, so unwrap to ``value``
+    (``=""`` -> empty). Only the exact ``="..."`` shape is touched; ordinary values pass through.
+    """
+    if isinstance(value, str) and len(value) >= 3 and value.startswith('="') and value.endswith('"'):
+        return value[2:-1]
+    return value
+
+
 def _parse_downloaded_table_with_metadata(
     path: Path, *, fmt: str, skip_rows: int = 0
 ) -> tuple[list[dict[str, Any]], str]:
@@ -3041,7 +3278,7 @@ def _parse_downloaded_table_with_metadata(
     else:
         df, encoding = _read_csv_with_fallback(path, skip_rows=skip_rows)
     rows = [
-        {str(k): ("" if pd.isna(v) else v) for k, v in row.items()}
+        {str(k): ("" if pd.isna(v) else _unwrap_excel_text_guard(v)) for k, v in row.items()}
         for row in df.to_dict("records")
     ]
     return rows, encoding
