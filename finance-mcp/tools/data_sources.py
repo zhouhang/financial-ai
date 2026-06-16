@@ -10286,6 +10286,25 @@ async def _handle_data_source_preview(arguments: dict[str, Any]) -> dict[str, An
             "rows": rows,
             "message": "已返回支付宝账单样例",
         }
+    if _dataset_uses_browser_collection_records(dataset_row):
+        collection_rows = _load_dataset_sample_rows_from_browser_collection_records(
+            company_id=company_id,
+            data_source_id=source_id,
+            dataset_id=_safe_text((dataset_row or {}).get("id")),
+            dataset_code=_safe_text((dataset_row or {}).get("dataset_code")),
+            resource_key=(
+                _safe_text((dataset_row or {}).get("resource_key"))
+                or _resource_key_from_args(arguments)
+            ),
+            limit=limit,
+        )
+        return {
+            "success": True,
+            "source_id": source_id,
+            "count": len(collection_rows),
+            "rows": collection_rows,
+            "message": "已返回浏览器采集记录样例",
+        }
     if not (_is_database_source_row(source_row) and dataset_row):
         collection_rows = _load_dataset_sample_rows_from_collection_records(
             company_id=company_id,

@@ -2857,6 +2857,83 @@ async def test_preview_reads_alipay_platform_bill_lines(
 
 
 @pytest.mark.anyio
+async def test_preview_reads_browser_collection_records(
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_user",
+        lambda token: {"id": "user-1", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "company_id": company_id,
+            "source_kind": "browser_playbook",
+            "provider_code": "browser_playbook",
+            "status": "active",
+            "is_enabled": True,
+        },
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_dataset_by_id",
+        lambda company_id, dataset_id: {
+            "id": dataset_id,
+            "data_source_id": "source-browser-1",
+            "dataset_code": "jd_orders",
+            "resource_key": "jd-orders@1",
+            "extract_config": {
+                "source_type": "browser_collection_records",
+                "storage": "browser_collection_records",
+            },
+            "schema_summary": {"storage": "browser_collection_records"},
+            "meta": {"source_type": "browser_collection_records"},
+        },
+    )
+
+    def fake_list_browser_collection_records(**kwargs: Any) -> list[dict[str, Any]]:
+        calls["list_browser_collection_records"] = kwargs
+        return [{"payload": {"订单号": "JD1001", "实收金额": "12.30"}}]
+
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_browser_collection_records",
+        fake_list_browser_collection_records,
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_load_dataset_sample_rows_from_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "list_dataset_collection_records",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("wrong storage")),
+    )
+
+    result = await data_sources._handle_data_source_preview(
+        {
+            "auth_token": "token",
+            "source_id": "source-browser-1",
+            "dataset_id": "dataset-browser-1",
+            "limit": 10,
+        }
+    )
+
+    assert result["success"] is True
+    assert result["rows"] == [{"订单号": "JD1001", "实收金额": "12.30"}]
+    assert result["message"] == "已返回浏览器采集记录样例"
+    assert calls["list_browser_collection_records"]["dataset_id"] == "dataset-browser-1"
+    assert calls["list_browser_collection_records"]["dataset_code"] == "jd_orders"
+    assert calls["list_browser_collection_records"]["resource_key"] == "jd-orders@1"
+
+
+@pytest.mark.anyio
 async def test_collection_detail_reads_alipay_platform_bill_lines(
     monkeypatch,
 ) -> None:

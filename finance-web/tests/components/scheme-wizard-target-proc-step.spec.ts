@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { buildDatasetSamplePayloadForTest } from '../../src/components/ReconWorkspace';
 import { filterBrowserCollectionFieldItems } from '../../src/components/recon/browserCollectionSchema';
+import { extractDatasetPreviewRows } from '../../src/components/recon/datasetPreview';
 import { normalizeCandidateDataset } from '../../src/components/recon/SchemeWizardTargetProcStep';
 import {
   applyRuleGenerationEventToDraft,
@@ -109,6 +110,24 @@ describe('normalizeCandidateDataset', () => {
     );
 
     expect(fields).toEqual([{ raw_name: '账期', display_name: '账期' }]);
+  });
+
+  it('browser_playbook preview 返回采集记录时提取 payload 样例行', () => {
+    const rows = extractDatasetPreviewRows(
+      {
+        rows: [
+          {
+            payload: {
+              订单号: 'JD1001',
+              实收金额: '12.30',
+            },
+          },
+        ],
+      },
+      10,
+    );
+
+    expect(rows).toEqual([{ 订单号: 'JD1001', 实收金额: '12.30' }]);
   });
 
   it('规则生成 payload 不把 browser_playbook 技术 schema 作为字段候选', () => {
