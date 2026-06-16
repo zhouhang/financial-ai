@@ -291,17 +291,20 @@ export function BrowserPlaybookPanel({
     () => {
       const browserSources = sources
         .filter((source) => source.source_kind === 'browser_playbook')
-        .map((source, index) => ({
-          source,
-          index,
-          title: registrationTitle(source),
-          status: source.status || source.health_status || 'unknown',
-          taskStatus: text(source.browser_verification?.job_status),
-          taskLabel: taskStatusLabel(source),
-          taskError: taskError(source),
-          taskUpdatedAt: taskUpdatedAt(source),
-          updatedAt: source.updated_at || source.last_checked_at || '',
-        }));
+        .map((source, index) => {
+          const lastTaskUpdatedAt = taskUpdatedAt(source);
+          return {
+            source,
+            index,
+            title: registrationTitle(source),
+            status: source.status || source.health_status || 'unknown',
+            taskStatus: text(source.browser_verification?.job_status),
+            taskLabel: taskStatusLabel(source),
+            taskError: taskError(source),
+            taskUpdatedAt: lastTaskUpdatedAt,
+            updatedAt: source.last_sync_at || lastTaskUpdatedAt || source.updated_at || source.last_checked_at || '',
+          };
+        });
 
       browserSources.sort((left, right) => {
         const leftRank = createdAtRank(left.source.created_at);
@@ -964,7 +967,7 @@ export function BrowserPlaybookPanel({
                       </td>
                       <td className="px-4 py-3 text-text-secondary">{statusLabel(row.status)}</td>
                       <td className="px-4 py-3 text-text-secondary">
-                        {formatDateTime(row.taskUpdatedAt || row.updatedAt)}
+                        {formatDateTime(row.updatedAt)}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex min-w-[340px] items-center gap-2 whitespace-nowrap">

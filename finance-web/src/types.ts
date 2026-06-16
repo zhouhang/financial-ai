@@ -387,6 +387,7 @@ export interface DataSourceListItem {
   description?: string;
   created_at?: string | null;
   updated_at?: string | null;
+  last_sync_at?: string | null;
   health_status?: DataSourceHealthStatus;
   last_checked_at?: string | null;
   last_error_message?: string | null;

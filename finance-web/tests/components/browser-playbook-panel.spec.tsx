@@ -119,6 +119,31 @@ describe('BrowserPlaybookPanel', () => {
     expect(screen.queryByText('2026/5/21 09:00:00')).not.toBeInTheDocument();
   });
 
+  it('最近更新优先展示浏览器任务的 last_sync_at', () => {
+    render(
+      <BrowserPlaybookPanel
+        authToken="token-1"
+        sources={[
+          {
+            ...sources[0],
+            updated_at: '2026-05-21T09:00:00+08:00',
+            last_sync_at: '2026-06-16T10:15:30+08:00',
+            browser_verification: {
+              sync_job_id: 'sync-success-older',
+              job_status: 'success',
+              completed_at: '2026-05-25T15:31:51+08:00',
+              is_verification: true,
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('2026/6/16 10:15:30')).toBeInTheDocument();
+    expect(screen.queryByText('2026/5/25 15:31:51')).not.toBeInTheDocument();
+    expect(screen.queryByText('2026/5/21 09:00:00')).not.toBeInTheDocument();
+  });
+
   it('浏览器任务列表超过一页时分页显示', () => {
     const manySources = Array.from({ length: 25 }, (_, index) => {
       const itemNumber = String(index + 1).padStart(2, '0');
