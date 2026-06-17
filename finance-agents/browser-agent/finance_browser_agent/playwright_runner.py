@@ -1841,6 +1841,18 @@ _CALENDAR_VISIBLE_MONTHS_JS = """
 # hh/mm/ss option lists render.
 _CALENDAR_OPEN_TIME_JS = """
 (index) => {
+  // Open the time picker by clicking the dedicated PDD range time input (begin/end) directly
+  // via data-testid — document-scoped so it works regardless of which sub-panel (start/end
+  // date) the dropdown currently shows. The old panel-scoped heuristic couldn't find the END
+  // time input ("calendar time input open failed 23:59:59"). Falls back to the heuristic below.
+  const ded = document.querySelector(
+    "[data-testid='beast-core-rangePicker-timePicker-htmlInput-" + (index === 0 ? 'begin' : 'end') + "']"
+  );
+  if (ded) {
+    ['mousedown', 'mouseup', 'click'].forEach(t =>
+      ded.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
+    return {ok: true, via: 'dedicated_input'};
+  }
   const visible = (el) => {
     if (!el) return false;
     const style = window.getComputedStyle(el);
