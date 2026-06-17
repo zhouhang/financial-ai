@@ -2,8 +2,31 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Any
+
+
+def _coerce_value_list(value: Any) -> list[Any] | None:
+    """Return a list of scalar values when ``value`` represents multiple values, else None.
+
+    Handles both a genuine list and a *stringified* list (LLM/upstream sometimes emits the
+    Python repr, e.g. ``"['已收货', '已发货，待收货']"``). Only a real list literal is accepted;
+    a plain scalar string (``"已收货"``) or a non-list literal returns None so single-value
+    equality stays ``eq``.
+    """
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                return None
+            if isinstance(parsed, (list, tuple)):
+                return list(parsed)
+    return None
 
 
 SOURCE_REFERENCE_USAGES: set[str] = {
@@ -507,6 +530,12 @@ def _normalize_predicate(value: Any) -> dict[str, Any] | None:
             inferred_op = "eq"
         elif isinstance(value.get("conditions") or value.get("clauses") or value.get("predicates"), list):
             inferred_op = "and"
+    # A scalar-equality op carrying multiple values is really a membership test (e.g. the user
+    # wrote 订单状态取A和B). Upstream/LLM delivers those values as a genuine list OR a stringified
+    # list repr ("['A','B']"); both must route to `in` so it compiles to (col==A) or (col==B)
+    # instead of col == "['A','B']" (which matches nothing).
+    if inferred_op == "eq" and _coerce_value_list(value.get("value")):
+        inferred_op = "in"
     if inferred_op in {"eq", "neq", "gt", "gte", "lt", "lte", "contains"}:
         left = _normalize_expression_operand(value.get("left"))
         right = _normalize_expression_operand(value.get("right"))
@@ -532,7 +561,8 @@ def _normalize_predicate(value: Any) -> dict[str, Any] | None:
             right_value = value.get("right")
             raw_values = right_value if isinstance(right_value, list) else [right_value]
         if not isinstance(raw_values, list) and "value" in value:
-            raw_values = [value.get("value")]
+            coerced = _coerce_value_list(value.get("value"))
+            raw_values = coerced if coerced is not None else [value.get("value")]
         normalized_values = [
             normalized_operand
             for item in _safe_list(raw_values)

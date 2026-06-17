@@ -98,3 +98,43 @@ def test_stale_agent_running_job_is_reaped_then_cascaded(monkeypatch) -> None:
     sql = "\n".join(fail_cursor.sql)
     assert "status = 'waiting_data'" in sql
     assert "job_status IN ('failed', 'cancelled')" in sql
+
+
+def test_reap_long_running_browser_jobs_marks_retryable(monkeypatch) -> None:
+    # SELECT returns one stuck running job id
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+
+    calls: list[dict] = []
+
+    def _fake_fail(**kwargs):
+        calls.append(kwargs)
+        return {"id": kwargs.get("sync_job_id")}
+
+    monkeypatch.setattr(auth_db, "mark_browser_sync_job_failed", _fake_fail)
+
+    result = auth_db.reap_long_running_browser_jobs(max_runtime_seconds=1200)
+
+    sql = "\n".join(cursor.sql)
+    assert "job_status IN ('running', 'resuming')" in sql
+    assert "source_kind = 'browser_playbook'" in sql
+    assert "started_at <" in sql
+    assert cursor.params[0][0] == 1200  # threshold passed to the interval
+
+    # each stuck job goes through the canonical failure handler as RETRYABLE
+    assert len(calls) == 1
+    assert calls[0]["sync_job_id"] == "sync-stale-1"
+    assert calls[0]["retryable"] is True
+    assert calls[0]["fail_reason"] == "STALE_RUNNING_TIMEOUT"
+    assert calls[0]["allowed_current_statuses"] == ("running", "resuming")
+    assert result["reaped_count"] == 1
+    assert result["sync_job_ids"] == ["sync-stale-1"]
+
+
+def test_reap_long_running_browser_jobs_min_threshold(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+    monkeypatch.setattr(auth_db, "mark_browser_sync_job_failed", lambda **kw: {"id": "x"})
+    # values below the 60s floor are clamped up to 60
+    auth_db.reap_long_running_browser_jobs(max_runtime_seconds=5)
+    assert cursor.params[0][0] == 60

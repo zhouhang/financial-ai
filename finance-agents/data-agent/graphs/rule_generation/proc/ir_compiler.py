@@ -2,10 +2,27 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import re
 from dataclasses import dataclass, field
 from typing import Any
+
+
+def _as_membership_values(value: Any) -> list[Any] | None:
+    """A list, or a stringified list repr ("['A','B']"), of membership values; else None."""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                return None
+            if isinstance(parsed, (list, tuple)):
+                return list(parsed)
+    return None
 
 
 RUNTIME_FUNCTIONS = {
@@ -1463,6 +1480,23 @@ def _compile_predicate_fragment(
     compile_context: StepCompileContext,
 ) -> CompiledFormulaFragment | None:
     op = str(predicate.get("op") or "").strip()
+    # Safety net: an `eq` whose constant is a list (or a stringified list repr "['A','B']") is a
+    # membership test, not scalar equality. Compiled as-is it renders `col == "['A','B']"` and
+    # matches nothing, so rewrite to `in` regardless of which upstream path produced the predicate.
+    if op == "eq":
+        eq_right = predicate.get("right")
+        members = (
+            _as_membership_values(eq_right.get("value"))
+            if isinstance(eq_right, dict) and str(eq_right.get("op") or "") == "constant"
+            else None
+        )
+        if members:
+            predicate = {
+                "op": "in",
+                "left": predicate.get("left"),
+                "right": [{"op": "constant", "value": item} for item in members],
+            }
+            op = "in"
     if op in COMPARE_OPERATORS:
         left = predicate.get("left") if isinstance(predicate.get("left"), dict) else None
         right = predicate.get("right") if isinstance(predicate.get("right"), dict) else None

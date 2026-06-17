@@ -6410,12 +6410,13 @@ def create_tools() -> list[Tool]:
         ),
         Tool(
             name="browser_sync_job_reap_stale_agents",
-            description="调度器专用：将心跳过期 agent 名下仍 running 的 browser_playbook sync_job 标记失败（孤立作业兜底）。",
+            description="调度器专用：将心跳过期 agent 名下仍 running 的 browser_playbook sync_job 标记失败（孤立作业兜底）；并回收任意 agent 上 running 超时(默认20min)的僵尸作业为可重试。",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "worker_token": {"type": "string"},
                     "stale_after_seconds": {"type": "integer"},
+                    "max_runtime_seconds": {"type": "integer"},
                 },
                 "required": ["worker_token"],
             },
@@ -10465,36 +10466,37 @@ async def _handle_browser_sync_job_claim(arguments: dict[str, Any]) -> dict[str,
     if job and not _normalize_bool((job or {}).get("is_verification"), default=False):
         request_payload = job.get("request_payload") if isinstance(job, dict) else {}
         request_payload = request_payload if isinstance(request_payload, dict) else {}
-        nested_params = request_payload.get("params") if isinstance(request_payload.get("params"), dict) else {}
-        dataset_id = _safe_text(nested_params.get("dataset_id") or request_payload.get("dataset_id"))
-        biz_date = _safe_text(nested_params.get("biz_date") or request_payload.get("biz_date"))
-        reusable_job = None
-        if dataset_id and biz_date:
-            reusable_job = _find_reusable_browser_success_job(
-                company_id=_safe_text(job.get("company_id")),
-                data_source_id=_safe_text(job.get("data_source_id")),
-                dataset_id=dataset_id,
-                resource_key=_safe_text(job.get("resource_key")),
-                biz_date=biz_date,
-            )
-        reusable_job_id = _safe_text((reusable_job or {}).get("id"))
-        if reusable_job_id and reusable_job_id != _safe_text(job.get("id")):
-            completed_job = auth_db.mark_browser_sync_job_success(
-                sync_job_id=_safe_text(job.get("id")),
-                summary={
-                    "skipped": True,
-                    "reuse_reason": "browser_records_exist",
-                    "reused_sync_job_id": reusable_job_id,
-                },
-                allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
-            )
-            if completed_job:
-                return {
-                    "success": True,
-                    "job": None,
-                    "auto_completed": True,
-                    "completed_job": _attach_aliases_to_job(completed_job),
-                }
+        if not _skip_browser_success_reuse(request_payload, request_payload):
+            nested_params = request_payload.get("params") if isinstance(request_payload.get("params"), dict) else {}
+            dataset_id = _safe_text(nested_params.get("dataset_id") or request_payload.get("dataset_id"))
+            biz_date = _safe_text(nested_params.get("biz_date") or request_payload.get("biz_date"))
+            reusable_job = None
+            if dataset_id and biz_date:
+                reusable_job = _find_reusable_browser_success_job(
+                    company_id=_safe_text(job.get("company_id")),
+                    data_source_id=_safe_text(job.get("data_source_id")),
+                    dataset_id=dataset_id,
+                    resource_key=_safe_text(job.get("resource_key")),
+                    biz_date=biz_date,
+                )
+            reusable_job_id = _safe_text((reusable_job or {}).get("id"))
+            if reusable_job_id and reusable_job_id != _safe_text(job.get("id")):
+                completed_job = auth_db.mark_browser_sync_job_success(
+                    sync_job_id=_safe_text(job.get("id")),
+                    summary={
+                        "skipped": True,
+                        "reuse_reason": "browser_records_exist",
+                        "reused_sync_job_id": reusable_job_id,
+                    },
+                    allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
+                )
+                if completed_job:
+                    return {
+                        "success": True,
+                        "job": None,
+                        "auto_completed": True,
+                        "completed_job": _attach_aliases_to_job(completed_job),
+                    }
     return {"success": True, "job": job}
 
 
@@ -10593,7 +10595,19 @@ async def _handle_browser_sync_job_reap_stale_agents(arguments: dict[str, Any]) 
     result = auth_db.reap_stale_agent_running_jobs(stale_after_seconds=stale_after_seconds)
     if result.get("error"):
         return {"success": False, **result}
-    return {"success": True, **result}
+    # Also reap zombie jobs stuck 'running' on a LIVE agent (the stale-heartbeat reaper above
+    # only covers DEAD agents). Default 20 min — far beyond any real browser job (~1-2 min,
+    # qianniu bill download polls up to ~10 min). Same cron call drives both.
+    raw_runtime = arguments.get("max_runtime_seconds")
+    max_runtime_seconds = int(raw_runtime) if isinstance(raw_runtime, (int, float)) and int(raw_runtime) > 0 else 1200
+    long_running = auth_db.reap_long_running_browser_jobs(max_runtime_seconds=max_runtime_seconds)
+    return {
+        "success": True,
+        **result,
+        "long_running_reaped_count": long_running.get("reaped_count", 0),
+        "long_running_sync_job_ids": long_running.get("sync_job_ids", []),
+        **({"long_running_error": long_running["error"]} if long_running.get("error") else {}),
+    }
 
 
 async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[str, Any]:

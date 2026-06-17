@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import uuid
 from typing import Any, Awaitable, Callable
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 _REQUEST_TIMEOUT = 120.0
 _CONNECT_TIMEOUT = 10.0
 _RETRY_BACKOFF_SECONDS = (1.0, 3.0, 8.0)
+_DEFAULT_PING_TIMEOUT_SECONDS = 20.0
 EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
@@ -39,8 +41,37 @@ def _is_transient_result_error(error: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _env_optional_positive_float(name: str, default: float | None) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"0", "false", "none", "off", "disable", "disabled"}:
+        return None
+    try:
+        value = float(normalized)
+    except ValueError:
+        logger.warning("%s 配置无效: %r，使用默认值 %s", name, raw, default)
+        return default
+    return value if value > 0 else None
+
+
 async def _default_connector(url: str):
-    return await websockets.connect(url, max_size=None, proxy=None)
+    # Public WSS can cross multiple reverse proxies. Production collectors already send frequent
+    # application messages (claim + heartbeat), so keep protocol pings opt-in to avoid proxy-level
+    # pong loss tearing down otherwise healthy long-lived connections.
+    ping_interval = _env_optional_positive_float("BROWSER_AGENT_WS_PING_INTERVAL_SECONDS", None)
+    ping_timeout = _env_optional_positive_float(
+        "BROWSER_AGENT_WS_PING_TIMEOUT_SECONDS",
+        _DEFAULT_PING_TIMEOUT_SECONDS,
+    )
+    return await websockets.connect(
+        url,
+        max_size=None,
+        proxy=None,
+        ping_interval=ping_interval,
+        ping_timeout=ping_timeout,
+    )
 
 
 class DataAgentWsClient:

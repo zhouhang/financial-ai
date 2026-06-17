@@ -1666,17 +1666,8 @@ def test_browser_sync_job_claim_auto_completes_when_records_already_exist(monkey
     )
     monkeypatch.setattr(
         data_sources.auth_db,
-        "list_browser_collection_records",
-        lambda **_kwargs: [{"id": "record-1", "latest_seen_job_id": "verified-job-1"}],
-    )
-    monkeypatch.setattr(
-        data_sources.auth_db,
-        "get_unified_sync_job_by_id",
-        lambda sync_job_id: {
-            "id": sync_job_id,
-            "job_status": "success",
-            "request_payload": {"dataset_id": "dataset-001", "biz_date": "2026-05-25"},
-        },
+        "find_success_dataset_collection_sync_job",
+        lambda **_kwargs: {"id": "verified-job-1", "job_status": "success"},
     )
 
     def fake_mark_success(**kwargs: Any) -> dict[str, Any]:
@@ -1707,6 +1698,59 @@ def test_browser_sync_job_claim_auto_completes_when_records_already_exist(monkey
             "allowed_current_statuses": tuple(data_sources.BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
         }
     ]
+
+
+def test_browser_sync_job_claim_force_collection_skips_record_reuse(monkeypatch) -> None:
+    import asyncio
+
+    data_sources = _import_mcp_data_sources()
+
+    claimed_job = {
+        "id": "sync-force",
+        "company_id": "company-001",
+        "data_source_id": "source-001",
+        "resource_key": "playbook-1@1",
+        "job_status": "running",
+        "is_verification": False,
+        "request_payload": {
+            "dataset_id": "dataset-001",
+            "biz_date": "2026-05-25",
+            "force_collection": True,
+            "skip_recent_success_reuse": True,
+        },
+    }
+
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "claim_next_browser_sync_job",
+        lambda *, agent_id, agent_max_concurrency: claimed_job,
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_find_reusable_browser_success_job",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("force collection must not reuse records")),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "mark_browser_sync_job_success",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("force collection must not auto-complete")),
+    )
+
+    result = asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_claim",
+            {"worker_token": "tok", "agent_id": "agent-001", "max_concurrency": 2},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["job"] == claimed_job
+    assert "auto_completed" not in result
 
 
 def test_browser_agent_heartbeat_tool_calls_helper(monkeypatch) -> None:

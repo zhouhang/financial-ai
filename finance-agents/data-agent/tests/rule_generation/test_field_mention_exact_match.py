@@ -39,3 +39,32 @@ def test_no_exact_match_still_ambiguous_when_only_partial() -> None:
     candidates = _fields("退款单号", "商户订单号", "子订单号")
     result = _match_field_mention("单号", candidates)
     assert result["status"] == "ambiguous"
+
+
+from graphs.rule_generation.service import _clean_field_mention
+
+
+def test_user_prefixed_field_binds_after_aggressive_clean_strips_用() -> None:
+    """_clean_field_mention strips a leading 用 (meant for verb '用X作为...'), which mangles
+    fields that legitimately start with 用户 (用户实付金额(元) -> 户实付金额(元)). The matcher
+    must still bind such a mangled mention to its real field via symmetric cleaning of candidates.
+
+    Regression: PDD order dataset, '用户实付金额(元)作为对比字段' -> mention '户实付金额(元)'.
+    """
+    mangled = _clean_field_mention("用户实付金额(元)")
+    assert mangled == "户实付金额(元)"  # documents the aggressive-clean behavior
+
+    candidates = _fields("订单号", "订单状态", "用户实付金额(元)", "商家实收金额(元)", "邮费(元)")
+    result = _match_field_mention(mangled, candidates)
+    assert result["status"] == "bound", result
+    assert result["selected_field"]["name"] == "用户实付金额(元)"
+
+
+def test_verb_phrase_用订单号_still_binds_to_订单号() -> None:
+    """The aggressive leading-用 strip exists to rescue verb phrases like '用订单号作为匹配字段'.
+    After the fix that path must still work: cleaned mention '订单号' binds to field 订单号.
+    """
+    assert _clean_field_mention("用订单号") == "订单号"
+    result = _match_field_mention("订单号", _fields("订单号", "用户实付金额(元)"))
+    assert result["status"] == "bound"
+    assert result["selected_field"]["name"] == "订单号"

@@ -34,6 +34,7 @@ import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -3320,6 +3321,15 @@ def _apply_json_transform(value: Any, transform: str) -> Any:
             dt = datetime.fromtimestamp(int(value) / 1000, tz=timezone(timedelta(hours=8)))
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
+            return value
+    if transform in {"cent_to_yuan", "fen_to_yuan"}:
+        try:
+            yuan = (Decimal(str(value)) / Decimal("100")).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+            return f"{yuan:.2f}"
+        except (InvalidOperation, ValueError):
             return value
     return value
 

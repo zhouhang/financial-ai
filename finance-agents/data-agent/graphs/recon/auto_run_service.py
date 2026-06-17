@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -1684,7 +1685,8 @@ async def sync_exception_reminder(
         company_id=str(exception.get("company_id") or ""),
         channel_code=channel_code or None,
     )
-    sync_result = adapter.sync_todo_status(
+    sync_result = await asyncio.to_thread(
+        adapter.sync_todo_status,
         todo_id=todo_id,
         max_polls=max(1, max_polls),
         poll_interval_seconds=max(0.5, poll_interval_seconds),
@@ -1768,7 +1770,8 @@ async def sync_execution_run_exception_reminder(
                 channel_code=channel_code or None,
             )
 
-        sync_result = adapter.sync_todo_status(
+        sync_result = await asyncio.to_thread(
+            adapter.sync_todo_status,
             todo_id=todo_id,
             max_polls=max(1, max_polls),
             poll_interval_seconds=max(0.5, poll_interval_seconds),
@@ -1922,7 +1925,8 @@ async def sync_pending_todo_exceptions(
                     company_id=company_id,
                 )
 
-            sync_result = adapter.sync_todo_status(
+            sync_result = await asyncio.to_thread(
+                adapter.sync_todo_status,
                 todo_id=todo_id,
                 max_polls=max(1, max_polls),
                 poll_interval_seconds=max(0.5, poll_interval_seconds),

@@ -564,6 +564,51 @@ async def test_ws_request_retries_idempotent_completion_after_disconnect() -> No
     assert [msg["type"] for msg in created_sockets[1].sent] == ["hello", "job_complete"]
 
 
+async def test_default_ws_connector_disables_protocol_ping_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_connect(url: str, **kwargs: Any) -> object:
+        captured["url"] = url
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.delenv("BROWSER_AGENT_WS_PING_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("BROWSER_AGENT_WS_PING_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(data_agent_ws_module.websockets, "connect", fake_connect)
+
+    result = await data_agent_ws_module._default_connector("wss://example.invalid/api/browser-agent")
+
+    assert result is not None
+    assert captured["url"] == "wss://example.invalid/api/browser-agent"
+    assert captured["ping_interval"] is None
+    assert captured["ping_timeout"] == 20.0
+    assert captured["max_size"] is None
+    assert captured["proxy"] is None
+
+
+async def test_default_ws_connector_allows_protocol_ping_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_connect(url: str, **kwargs: Any) -> object:
+        captured["url"] = url
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setenv("BROWSER_AGENT_WS_PING_INTERVAL_SECONDS", "45")
+    monkeypatch.setenv("BROWSER_AGENT_WS_PING_TIMEOUT_SECONDS", "90")
+    monkeypatch.setattr(data_agent_ws_module.websockets, "connect", fake_connect)
+
+    result = await data_agent_ws_module._default_connector("wss://example.invalid/api/browser-agent")
+
+    assert result is not None
+    assert captured["ping_interval"] == 45.0
+    assert captured["ping_timeout"] == 90.0
+
+
 async def test_ws_request_retries_idempotent_completion_after_transient_server_error() -> None:
     class _TransientErrorWs(_FakeWs):
         def __init__(self, *, transient_failures: int = 1) -> None:

@@ -6679,6 +6679,61 @@ def reap_stale_agent_running_jobs(*, stale_after_seconds: int = 180) -> dict[str
     return {"failed_count": len(sync_job_ids), "sync_job_ids": sync_job_ids}
 
 
+def reap_long_running_browser_jobs(
+    *, max_runtime_seconds: int = 1200, retry_delay_seconds: int = 60
+) -> dict[str, Any]:
+    """Fail browser_playbook sync_jobs stuck in 'running' far longer than any real job takes.
+
+    Independent of agent heartbeat: ``reap_stale_agent_running_jobs`` only rescues jobs of a
+    DEAD agent, but a job can also zombie on a LIVE agent (worker thread hung, or an orphaned
+    'running' row left after a worker died without marking it). Such a zombie permanently eats a
+    concurrency slot (the claim caps on running_count) and serializes everything for that agent.
+    Normal browser jobs finish in 1-2 min (the slowest, qianniu bill download, polls up to ~10
+    min), so a job running past ``max_runtime_seconds`` (default 20 min) is presumed stuck and is
+    failed as RETRYABLE — it returns to 'pending' for re-collection (terminal only after
+    max_attempts). Server-side completion writes are idempotent, so requeuing a job whose worker
+    is merely hung cannot double-persist.
+    """
+    threshold = max(60, int(max_runtime_seconds))
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT sync_jobs.id
+                    FROM sync_jobs
+                    JOIN data_sources ds ON ds.id = sync_jobs.data_source_id
+                    WHERE sync_jobs.job_status IN ('running', 'resuming')
+                      AND ds.source_kind = 'browser_playbook'
+                      AND sync_jobs.started_at IS NOT NULL
+                      AND sync_jobs.started_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                    """,
+                    (threshold,),
+                )
+                stuck_ids = [str(row.get("id") or "") for row in (cur.fetchall() or []) if row.get("id")]
+    except Exception as e:
+        logger.error(f"reap_long_running_browser_jobs 查询失败 (max_runtime_seconds={threshold}): {e}")
+        return {"reaped_count": 0, "sync_job_ids": [], "error": str(e)}
+
+    reaped: list[str] = []
+    for sync_job_id in stuck_ids:
+        # Reuse the canonical failure handler so retry/terminal + binding transitions stay correct.
+        # Guard on the running/resuming status so a job that finished between SELECT and now is
+        # left untouched (no race that fails an already-completed job).
+        result = mark_browser_sync_job_failed(
+            sync_job_id=sync_job_id,
+            error_message="browser job exceeded max runtime, presumed stuck",
+            fail_reason="STALE_RUNNING_TIMEOUT",
+            retryable=True,
+            retry_delay_seconds=int(retry_delay_seconds),
+            allowed_current_statuses=("running", "resuming"),
+        )
+        if result:
+            reaped.append(sync_job_id)
+    return {"reaped_count": len(reaped), "sync_job_ids": reaped}
+
+
 def mark_browser_sync_job_failed(
     *,
     sync_job_id: str,

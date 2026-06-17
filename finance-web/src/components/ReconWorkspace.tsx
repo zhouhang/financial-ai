@@ -317,7 +317,7 @@ interface SchemeMetaSummary {
 }
 
 const SCHEME_LIST_TEMPLATE =
-  'minmax(0,1.6fr) minmax(220px,1fr) minmax(220px,1fr) minmax(268px,auto)';
+  'minmax(0,1.8fr) minmax(180px,0.7fr) minmax(268px,auto)';
 const TASK_LIST_TEMPLATE =
   'minmax(260px,1.7fr) minmax(360px,2.2fr) minmax(140px,0.75fr) minmax(96px,0.45fr) minmax(240px,auto)';
 const RUN_LIST_TEMPLATE =
@@ -5876,13 +5876,10 @@ export default function ReconWorkspace({
     <div className="overflow-x-auto rounded-[26px] border border-border bg-surface shadow-sm">
       <div className="w-full min-w-[1080px]">
         <ListHeader
-          columns={['对账方案', '整理规则', '对账逻辑', '操作']}
+          columns={['对账方案', '创建时间', '操作']}
           template={SCHEME_LIST_TEMPLATE}
         />
         {schemes.map((item) => {
-          const schemeMeta = extractSchemeMeta(item);
-          const procRuleLabel = schemeMeta.procRuleName || (item.name ? `${item.name}整理规则` : '整理规则');
-          const reconRuleLabel = schemeMeta.reconRuleName || (item.name ? `${item.name} 对账逻辑` : '未命名对账逻辑');
           const isGuardVisible = schemeDeleteGuard?.schemeId === item.id;
           const guardTasks = isGuardVisible ? schemeDeleteGuard?.tasks || [] : [];
           return (
@@ -5898,10 +5895,7 @@ export default function ReconWorkspace({
                   <p className="truncate text-sm font-semibold text-text-primary">{item.name}</p>
                 </div>
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-text-primary">{procRuleLabel}</p>
-                </div>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-text-primary">{reconRuleLabel}</p>
+                  <p className="truncate text-sm text-text-secondary">{formatDateTime(item.createdAt)}</p>
                 </div>
                 <div className="flex items-center justify-self-end gap-2">
                   <button

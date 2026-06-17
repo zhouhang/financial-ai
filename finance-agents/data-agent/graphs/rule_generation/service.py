@@ -2818,6 +2818,16 @@ def _text_match_variants(value: Any) -> list[str]:
     stripped = re.sub(r"[（(][^（）()]{1,12}[）)]$", "", text).strip()
     if stripped and stripped != text:
         variants.append(stripped)
+    # Match candidates against the SAME aggressive cleaning applied to user mentions
+    # (_clean_field_mention). That cleaner strips a leading 用/以/把… as if it were a verb,
+    # which mangles fields that legitimately start with such a char (用户实付金额(元) ->
+    # 户实付金额(元), 以旧换新金额 -> 旧换新金额). Cleaning both sides symmetrically lets the
+    # mangled mention still bind to its real field, while verb phrases like 用订单号 -> 订单号
+    # keep working via the raw 订单号 variant.
+    for base in list(variants):
+        cleaned = _clean_field_mention(base)
+        if cleaned and cleaned not in variants:
+            variants.append(cleaned)
     return variants
 
 

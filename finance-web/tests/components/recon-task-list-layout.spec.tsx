@@ -35,6 +35,57 @@ afterEach(() => {
 });
 
 describe('对账任务列表布局', () => {
+  it('对账方案列表隐藏规则列并展示创建时间', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.split('?')[0] === '/api/recon/schemes') {
+        return jsonResponse({
+          schemes: [
+            {
+              id: 'scheme-1',
+              scheme_code: 'scheme_code_1',
+              scheme_name: '订单对账方案',
+              is_enabled: true,
+              scheme_meta_json: {
+                proc_rule_name: '订单整理规则',
+                recon_rule_name: '订单对账规则',
+              },
+              created_at: '2026-05-17T09:00:00.000Z',
+              updated_at: '2026-05-18T09:00:00.000Z',
+            },
+          ],
+        });
+      }
+      if (url.split('?')[0] === '/api/recon/tasks') {
+        return jsonResponse({ tasks: [] });
+      }
+      if (url.split('?')[0] === '/api/recon/runs') {
+        return jsonResponse({ runs: [] });
+      }
+      if (url === '/api/collaboration-channels') {
+        return jsonResponse({ channels: [] });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(<ReconWorkspace selectedTask={selectedTask} authToken="test-token" />);
+
+    fireEvent.click(screen.getByRole('button', { name: '对账方案', exact: true }));
+
+    const schemeName = await screen.findByText('订单对账方案');
+    const schemeList = schemeName.closest('.overflow-x-auto');
+    if (!schemeList) {
+      throw new Error('方案列表容器未渲染');
+    }
+
+    expect(within(schemeList as HTMLElement).getByText('创建时间')).toBeInTheDocument();
+    expect(within(schemeList as HTMLElement).getByText('2026/05/17 17:00')).toBeInTheDocument();
+    expect(within(schemeList as HTMLElement).queryByText('整理规则')).not.toBeInTheDocument();
+    expect(within(schemeList as HTMLElement).queryByText('对账逻辑')).not.toBeInTheDocument();
+    expect(within(schemeList as HTMLElement).queryByText('订单整理规则')).not.toBeInTheDocument();
+    expect(within(schemeList as HTMLElement).queryByText('订单对账规则')).not.toBeInTheDocument();
+  });
+
   it('在任务名称下方展示创建时间和协作责任信息，并隐藏独立方案和创建时间列', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
