@@ -15,7 +15,11 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 
-from graphs.recon.auto_run_service import execute_run_plan_run, finalize_and_deliver_daily_digest
+from graphs.recon.auto_run_service import (
+    _RUN_SUCCESS_STATUSES,
+    execute_run_plan_run,
+    finalize_and_deliver_daily_digest,
+)
 from graphs.recon.diff_digestion_service import run_diff_digestion
 from tools.mcp_client import (
     execution_run_update,
@@ -92,6 +96,137 @@ def _queue_duration_seconds(started_at: object, finished_at: object) -> float | 
     except ValueError:
         return None
     return round(max(0.0, (finish - start).total_seconds()), 6)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _duration_seconds(started_at: object, finished_at: object) -> float:
+    try:
+        start = datetime.fromisoformat(str(started_at or "").replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(str(finished_at or "").replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    return round(max(0.0, (finish - start).total_seconds()), 6)
+
+
+def _build_auto_diff_digestion_skipped(error: str) -> dict:
+    return {
+        "enabled": True,
+        "attempted": False,
+        "ok": False,
+        "error": error,
+        "summary": {},
+    }
+
+
+def _is_successful_execution(result: dict, run: dict) -> bool:
+    if not bool(result.get("success")):
+        return False
+    execution_status = str(run.get("execution_status") or "").strip().lower()
+    return execution_status in _RUN_SUCCESS_STATUSES
+
+
+async def _safe_execution_run_update_artifacts(
+    auth_token: str,
+    run_id: str,
+    artifacts: dict,
+    *,
+    context: str,
+) -> None:
+    if not run_id:
+        return
+    try:
+        result = await execution_run_update(auth_token, run_id, {"artifacts_json": artifacts})
+    except Exception as exc:
+        logger.warning(
+            "[recon-worker] 更新执行记录 artifacts 失败但继续 run_id=%s context=%s error=%s",
+            run_id,
+            context,
+            exc,
+            exc_info=True,
+        )
+        return
+    if not bool((result or {}).get("success")):
+        logger.warning(
+            "[recon-worker] 更新执行记录 artifacts 返回失败但继续 run_id=%s context=%s error=%s",
+            run_id,
+            context,
+            (result or {}).get("error") or (result or {}).get("message") or result,
+        )
+
+
+async def _run_auto_diff_digestion_after_success(
+    auth_token: str,
+    run_id: str,
+    biz_date: str,
+) -> dict:
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return _build_auto_diff_digestion_skipped("run_id 为空，跳过自动差异消化")
+
+    logger.info("[recon-worker] 自动差异消化开始 run_id=%s biz_date=%s", run_id, biz_date)
+    started_at = _utc_now_iso()
+    try:
+        result = await run_diff_digestion(
+            auth_token=auth_token,
+            run_id=run_id,
+            biz_date=biz_date,
+        )
+    except Exception as exc:
+        finished_at = _utc_now_iso()
+        logger.warning(
+            "[recon-worker] 自动差异消化异常 run_id=%s biz_date=%s error=%s",
+            run_id,
+            biz_date,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "enabled": True,
+            "attempted": True,
+            "ok": False,
+            "error": str(exc),
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_seconds": _duration_seconds(started_at, finished_at),
+            "summary": {},
+        }
+
+    finished_at = _utc_now_iso()
+    ok = bool(result.get("ok"))
+    summary = dict(result.get("summary") or {})
+    artifact = {
+        "enabled": True,
+        "attempted": True,
+        "ok": ok,
+        "error": "" if ok else str(result.get("error") or ""),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_seconds": _duration_seconds(started_at, finished_at),
+        "summary": summary,
+    }
+    if ok:
+        logger.info(
+            "[recon-worker] 自动差异消化完成 run_id=%s biz_date=%s resolved=%s reclassified=%s kept=%s open_counts=%s duration=%s",
+            run_id,
+            biz_date,
+            summary.get("resolved"),
+            summary.get("reclassified"),
+            summary.get("kept"),
+            summary.get("open_counts"),
+            artifact["duration_seconds"],
+        )
+    else:
+        logger.warning(
+            "[recon-worker] 自动差异消化失败 run_id=%s biz_date=%s error=%s duration=%s",
+            run_id,
+            biz_date,
+            artifact["error"],
+            artifact["duration_seconds"],
+        )
+    return artifact
 
 
 async def _process_job(job: dict, system_token: str) -> None:
@@ -172,20 +307,40 @@ async def _process_job(job: dict, system_token: str) -> None:
                 return
             logger.info("[recon-worker] job_id=%s 进入 waiting_data", job_id)
             return
-        complete_result = await recon_queue_complete(system_token, job_id)
-        completed_job = dict(complete_result.get("job") or {})
         run = dict(result.get("run") or {})
         run_id = str(run.get("id") or "")
         artifacts = dict(run.get("artifacts_json") or {})
         runtime_summary = dict(artifacts.get("runtime_summary") or {})
+        is_successful_execution = _is_successful_execution(result, run)
+        if is_successful_execution:
+            biz_date = str(result.get("biz_date") or job.get("biz_date") or "").strip()
+            runtime_summary["auto_diff_digestion"] = await _run_auto_diff_digestion_after_success(
+                auth_token=auth_token,
+                run_id=run_id,
+                biz_date=biz_date,
+            )
+            artifacts["runtime_summary"] = runtime_summary
+            await _safe_execution_run_update_artifacts(
+                auth_token,
+                run_id,
+                artifacts,
+                context="auto_diff_digestion",
+            )
+
+        complete_result = await recon_queue_complete(system_token, job_id)
+        completed_job = dict(complete_result.get("job") or {})
         queue = dict(runtime_summary.get("queue") or {})
         queue["finished_at"] = str(completed_job.get("finished_at") or queue.get("finished_at") or "")
         queue["duration_seconds"] = _queue_duration_seconds(queue.get("started_at"), queue.get("finished_at"))
         runtime_summary["queue"] = queue
         artifacts["runtime_summary"] = runtime_summary
-        if run_id:
-            await execution_run_update(auth_token, run_id, {"artifacts_json": artifacts})
-        if bool(result.get("success")) and str(run.get("execution_status") or "") == "success":
+        await _safe_execution_run_update_artifacts(
+            auth_token,
+            run_id,
+            artifacts,
+            context="queue_runtime_summary",
+        )
+        if is_successful_execution:
             biz_date = str(result.get("biz_date") or job.get("biz_date") or "").strip()
             if biz_date:
                 digest_result = await finalize_and_deliver_daily_digest(
