@@ -1923,8 +1923,19 @@ _CALENDAR_PICK_TIME_JS = """
     .filter(i => (i.getAttribute('placeholder') || '').includes('时间')
       || (i.className || '').toString().includes('time')
       || Boolean(i.closest("[class*='time'],[class*='Time']"))) : [];
+  // Read the applied time from the dedicated range time inputs first (PDD beast-core exposes
+  // data-testid'd begin/end time inputs); fall back to the heuristic panel input. The old
+  // heuristic-only readback returned null on PDD's current DOM, raising a false "not applied"
+  // even though the hh/mm/ss pick had succeeded.
+  const readBack = () => {
+    const ded = document.querySelector(
+      "[data-testid='beast-core-rangePicker-timePicker-htmlInput-" + (index === 0 ? 'begin' : 'end') + "']"
+    );
+    if (ded && ded.value) return ded.value;
+    return inputs[index] ? inputs[index].value : null;
+  };
   if (okh && okm && oks) {
-    return {ok: true, okh, okm, oks, value: inputs[index] ? inputs[index].value : null};
+    return {ok: true, okh, okm, oks, value: readBack()};
   }
 
   const columns = panel ? Array.from(panel.querySelectorAll(
@@ -1945,7 +1956,7 @@ _CALENDAR_PICK_TIME_JS = """
   const auxOkh = pickColumn(base, hh);
   const auxOkm = pickColumn(base + 1, mm);
   const auxOks = pickColumn(base + 2, ss);
-  const value = inputs[index] ? inputs[index].value : `${hh}:${mm}:${ss}`;
+  const value = readBack() || `${hh}:${mm}:${ss}`;
   return {
     ok: auxOkh && auxOkm && auxOks,
     okh: auxOkh,
