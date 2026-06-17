@@ -2360,6 +2360,18 @@ def _wait_for_post_login_selector(
     deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
     while time.monotonic() <= deadline:
         for context in contexts:
+            remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
+            per_selector_timeout_ms = min(remaining_ms, max(1, int(2000 / max(1, len(selectors)))))
+            for candidate_selector in selectors:
+                try:
+                    context.wait_for_selector(candidate_selector, timeout=per_selector_timeout_ms)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    locator = _safe_first_locator(context, candidate_selector)
+                    if locator is not None and _locator_visible(locator, timeout_ms=per_selector_timeout_ms):
+                        return
+        for context in contexts:
             detected = _detect_auth_or_risk(context)
             if detected:
                 last_detected = detected
@@ -2412,18 +2424,6 @@ def _wait_for_post_login_selector(
                             blocking_states={"AUTH_EXPIRED", "RISK_VERIFICATION"},
                             still_blocked_reason="auth expired or verification still blocked",
                         )
-        for context in contexts:
-            remaining_ms = int(max(1, (deadline - time.monotonic()) * 1000))
-            per_selector_timeout_ms = min(remaining_ms, max(1, int(2000 / max(1, len(selectors)))))
-            for candidate_selector in selectors:
-                try:
-                    context.wait_for_selector(candidate_selector, timeout=per_selector_timeout_ms)
-                    return
-                except Exception as exc:
-                    last_error = exc
-                    locator = _safe_first_locator(context, candidate_selector)
-                    if locator is not None and _locator_visible(locator, timeout_ms=per_selector_timeout_ms):
-                        return
     if risk_detected:
         raise BrowserActionError("RISK_VERIFICATION", f"post-login risk verification not completed: {last_error}")
     if auth_handoff_detected:
