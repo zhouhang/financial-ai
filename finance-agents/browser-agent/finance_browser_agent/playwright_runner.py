@@ -3499,6 +3499,57 @@ def _paginate_capture_json(
             pass
 
 
+def _dedupe_rows_by_item_key(
+    rows: list[dict[str, Any]], item_key_fields: list[str]
+) -> list[dict[str, Any]]:
+    """Collapse rows sharing the same item_key before the quality gate / upsert.
+
+    Pagination can return the same business row twice (page boundaries shift as new
+    records arrive mid-paging, or an XHR is captured twice). A handful of duplicate
+    item_keys must not fail the whole collection — and the downstream single-statement
+    ``INSERT ... ON CONFLICT DO UPDATE`` cannot touch the same conflict key twice anyway.
+
+    Identical duplicates (same payload) are dropped silently. Conflicting duplicates
+    (same key, different payload) keep the LAST occurrence and are logged as a warning,
+    since that may signal a real upstream ambiguity worth a look.
+    Rows whose key is empty are left untouched so the quality gate still flags them.
+    """
+    if not item_key_fields:
+        return rows
+    result: list[dict[str, Any]] = []
+    index_by_key: dict[str, int] = {}
+    identical = 0
+    conflicting = 0
+    conflict_samples: list[str] = []
+    for row in rows:
+        key = "|".join(str(row.get(field) or "").strip() for field in item_key_fields)
+        if not key.strip("|"):
+            result.append(row)  # empty key: let the quality gate flag it (PAGE_CHANGED)
+            continue
+        if key in index_by_key:
+            prev_idx = index_by_key[key]
+            if result[prev_idx] == row:
+                identical += 1
+            else:
+                conflicting += 1
+                if len(conflict_samples) < 5:
+                    conflict_samples.append(key)
+                result[prev_idx] = row  # keep last
+            continue
+        index_by_key[key] = len(result)
+        result.append(row)
+    if identical or conflicting:
+        logger.warning(
+            "browser collection deduped duplicate item_keys: identical=%s conflicting=%s "
+            "kept=%s sample_conflicts=%s",
+            identical,
+            conflicting,
+            len(result),
+            conflict_samples,
+        )
+    return result
+
+
 def run_playbook_with_playwright(
     message: dict[str, Any],
     *,
@@ -3699,6 +3750,9 @@ def _run_playbook_with_playwright_inner(
 
     output = dict(playbook.get("output") or {})
     quality_gate = dict(playbook.get("quality_gate") or {})
+    # Collapse pagination-overlap duplicates before the gate/upsert so a few repeated
+    # item_keys don't fail the whole collection (and don't break the single-statement upsert).
+    rows = _dedupe_rows_by_item_key(rows, list(output.get("item_key_fields") or []))
     summary_step_id = str(quality_gate.get("summary_step_id") or "")
     summary_row_count = extracted.get(str(quality_gate.get("row_count_field") or "row_count"))
     summary_amount_total = extracted.get(str(quality_gate.get("amount_total_field") or "amount_total"))
