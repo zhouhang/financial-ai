@@ -10601,12 +10601,21 @@ async def _handle_browser_sync_job_reap_stale_agents(arguments: dict[str, Any]) 
     raw_runtime = arguments.get("max_runtime_seconds")
     max_runtime_seconds = int(raw_runtime) if isinstance(raw_runtime, (int, float)) and int(raw_runtime) > 0 else 1200
     long_running = auth_db.reap_long_running_browser_jobs(max_runtime_seconds=max_runtime_seconds)
+    # Catch-all backstop for NON-browser zombies (database/platform_oauth) the browser-scoped
+    # reapers skip. Generous idle ceiling (default 90 min); keyed on started_at+updated_at so
+    # resumed/active jobs are spared. Same cron call drives all three.
+    raw_idle = arguments.get("max_idle_seconds")
+    max_idle_seconds = int(raw_idle) if isinstance(raw_idle, (int, float)) and int(raw_idle) > 0 else 5400
+    any_source = auth_db.reap_long_running_sync_jobs(max_idle_seconds=max_idle_seconds)
     return {
         "success": True,
         **result,
         "long_running_reaped_count": long_running.get("reaped_count", 0),
         "long_running_sync_job_ids": long_running.get("sync_job_ids", []),
         **({"long_running_error": long_running["error"]} if long_running.get("error") else {}),
+        "any_source_reaped_count": any_source.get("reaped_count", 0),
+        "any_source_sync_job_ids": any_source.get("sync_job_ids", []),
+        **({"any_source_error": any_source["error"]} if any_source.get("error") else {}),
     }
 
 

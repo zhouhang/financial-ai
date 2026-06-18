@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+    # browser-agent 走采集机 githook 独立发布,且不在服务端镜像里(Dockerfile.python 只含
+    # finance-mcp/data-agent/finance-cron),只改它/文档不应重建整栈。
+    paths-ignore:
+      - 'finance-agents/browser-agent/**'
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
 
 permissions:

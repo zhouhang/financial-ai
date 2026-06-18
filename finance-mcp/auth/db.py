@@ -6734,6 +6734,60 @@ def reap_long_running_browser_jobs(
     return {"reaped_count": len(reaped), "sync_job_ids": reaped}
 
 
+def reap_long_running_sync_jobs(
+    *, max_idle_seconds: int = 5400, retry_delay_seconds: int = 120
+) -> dict[str, Any]:
+    """Catch-all backstop: fail ANY sync_job (any source_kind) stuck running/resuming + idle.
+
+    The browser reapers (``reap_stale_agent_running_jobs`` / ``reap_long_running_browser_jobs``)
+    are scoped to ``source_kind='browser_playbook'`` and never touch database/platform_oauth
+    zombies — e.g. a hologres pull whose worker dies mid-run leaves an orphaned 'running' row
+    that nothing else cleans (one sat 3 days). This reaper covers every source kind.
+
+    Safety design (see assessment): keyed on BOTH ``started_at`` AND ``updated_at`` older than
+    ``max_idle_seconds`` — a job that resumed after a long human-verification handoff has a fresh
+    ``updated_at`` and is spared; only jobs with no progress for the whole window are reaped.
+    Human waits sit in ``waiting_human_verification`` (not running/resuming) and are never in
+    scope. Legit collections finish in minutes (p95 ~3 min), so the 90-min default never touches
+    a healthy run. Marked RETRYABLE (idempotent re-collect; the retry path skips browser-binding
+    transitions, so it is safe for non-browser sources).
+    """
+    threshold = max(300, int(max_idle_seconds))
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM sync_jobs
+                    WHERE job_status IN ('running', 'resuming')
+                      AND started_at IS NOT NULL
+                      AND started_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                      AND updated_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                    """,
+                    (threshold, threshold),
+                )
+                stuck_ids = [str(row.get("id") or "") for row in (cur.fetchall() or []) if row.get("id")]
+    except Exception as e:
+        logger.error(f"reap_long_running_sync_jobs 查询失败 (max_idle_seconds={threshold}): {e}")
+        return {"reaped_count": 0, "sync_job_ids": [], "error": str(e)}
+
+    reaped: list[str] = []
+    for sync_job_id in stuck_ids:
+        result = mark_browser_sync_job_failed(
+            sync_job_id=sync_job_id,
+            error_message="sync job idle beyond max runtime, presumed stuck",
+            fail_reason="STALE_RUNNING_TIMEOUT",
+            retryable=True,
+            retry_delay_seconds=int(retry_delay_seconds),
+            allowed_current_statuses=("running", "resuming"),
+        )
+        if result:
+            reaped.append(sync_job_id)
+    return {"reaped_count": len(reaped), "sync_job_ids": reaped}
+
+
 def mark_browser_sync_job_failed(
     *,
     sync_job_id: str,

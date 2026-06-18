@@ -138,3 +138,35 @@ def test_reap_long_running_browser_jobs_min_threshold(monkeypatch) -> None:
     # values below the 60s floor are clamped up to 60
     auth_db.reap_long_running_browser_jobs(max_runtime_seconds=5)
     assert cursor.params[0][0] == 60
+
+
+def test_reap_long_running_sync_jobs_all_sources_retryable(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        auth_db, "mark_browser_sync_job_failed",
+        lambda **kw: (calls.append(kw) or {"id": kw.get("sync_job_id")}),
+    )
+
+    result = auth_db.reap_long_running_sync_jobs(max_idle_seconds=5400)
+
+    sql = "\n".join(cursor.sql)
+    assert "job_status IN ('running', 'resuming')" in sql
+    assert "source_kind" not in sql           # catch-all: NOT scoped to browser
+    assert "started_at <" in sql and "updated_at <" in sql  # both timestamps (resume-safe)
+    assert cursor.params[0] == (5400, 5400)    # threshold applied to both intervals
+
+    assert len(calls) == 1
+    assert calls[0]["retryable"] is True
+    assert calls[0]["fail_reason"] == "STALE_RUNNING_TIMEOUT"
+    assert calls[0]["allowed_current_statuses"] == ("running", "resuming")
+    assert result["reaped_count"] == 1
+
+
+def test_reap_long_running_sync_jobs_min_threshold(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+    monkeypatch.setattr(auth_db, "mark_browser_sync_job_failed", lambda **kw: {"id": "x"})
+    auth_db.reap_long_running_sync_jobs(max_idle_seconds=10)  # below 300s floor
+    assert cursor.params[0] == (300, 300)
