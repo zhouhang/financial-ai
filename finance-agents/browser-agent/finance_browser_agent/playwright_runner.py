@@ -1643,6 +1643,29 @@ def _type_like_human(
     raise BrowserActionError("AUTH_EXPIRED", f"input did not finish before submit: selector={selector}")
 
 
+def _dismiss_legacy_jd_calendar(page: Any) -> None:
+    """Hide JD's legacy ``div.Cal`` popup if open.
+
+    The JD 虚拟订单 page (orderv.shop.jd.com) uses an old custom calendar that closes neither on
+    Escape nor reliably on blur, and is not an outside-click-aware overlay. Left open, its
+    absolutely-positioned popup overlaps and intercepts the next click — e.g. the 查询 button
+    click times out with "div.Cal subtree intercepts pointer events". The selected date lives on
+    the (readonly) input independently of the popup, so hiding the popup is safe and deterministic.
+    No-op on pages without a ``.Cal`` element (千牛/淘宝/抖音/拼多多 use different pickers).
+    """
+    try:
+        page.evaluate(
+            """() => {
+              document.querySelectorAll('.Cal').forEach(el => {
+                const s = window.getComputedStyle(el);
+                if (s.display !== 'none' && s.visibility !== 'hidden') el.style.display = 'none';
+              });
+            }"""
+        )
+    except Exception:
+        pass
+
+
 def _close_open_datepicker_overlay(page: Any) -> None:
     """Close a previous date-picker popup before targeting the next readonly input."""
     # Alibaba Next/Fusion overlay (some 淘系 pickers) — closes on Escape.
@@ -1657,22 +1680,8 @@ def _close_open_datepicker_overlay(page: Any) -> None:
             except Exception:
                 pass
 
-    # JD legacy calendar (div.Cal): not a Next overlay and ignores Escape. If left open after
-    # setting 开始时间, its absolutely-positioned popup overlaps and intercepts the 结束时间 input
-    # click (卡住). Dismiss with an outside mouse click so its internal open-state resets cleanly.
-    cal = _safe_first_locator(page, "div.Cal")
-    if cal is not None and _locator_visible(cal, timeout_ms=200):
-        try:
-            page.evaluate(
-                """() => {
-                  ['mousedown', 'mouseup', 'click'].forEach(t =>
-                    document.body.dispatchEvent(
-                      new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
-                }"""
-            )
-            _wait_for_timeout(page, 200)
-        except Exception:
-            pass
+    # JD legacy calendar (div.Cal): a leftover popup overlaps and intercepts the next input click.
+    _dismiss_legacy_jd_calendar(page)
 
 
 def _set_date_value(
@@ -1752,6 +1761,8 @@ def _set_date_value(
             "PAGE_CHANGED",
             f"set_date value not committed: selector={selector} expected={value} actual={actual_value}",
         )
+    # Close JD's legacy calendar popup so it can't intercept the next click (e.g. 查询 button).
+    _dismiss_legacy_jd_calendar(page)
     logger.info("browser date input committed: selector=%s value=%s", selector, value)
 
 
