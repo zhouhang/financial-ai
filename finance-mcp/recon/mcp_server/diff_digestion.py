@@ -220,6 +220,75 @@ def _judge_diff_outcome(
     return "kept", original_type, None
 
 
+def apply_outcomes_to_diff_result(
+    diff_result: dict[str, Any],
+    results: list[dict[str, Any]],
+    *,
+    source_key_field: str,
+    target_key_field: str,
+) -> dict[str, int]:
+    """Fold digestion outcomes into a freshly-computed diff_result.
+
+    So a refreshed period rollup reflects post-digestion state (the daily digest reads
+    recon_period_rollup, which the digestion writeback does not otherwise update):
+      - resolved      → row moves into ``matched_exact`` (leaves in-transit/diff, joins settled).
+      - reclassified  → row moves into its new bucket (matched_with_diff/source_only/target_only).
+      - kept          → unchanged.
+
+    Mutates ``diff_result`` in place; returns a {dest_bucket: moved_count} tally. Row identity is
+    resolved with the same merged-column helpers ``digest_diffs`` uses, so it matches the engine.
+    """
+    from . import recon_tool
+
+    moves: dict[str, str] = {}  # key token -> destination bucket
+    for item in results or []:
+        token = _diff_key_token(item, source_key_field)
+        if not token:
+            continue
+        outcome = str(item.get("outcome") or "")
+        if outcome == "resolved":
+            moves[token] = "matched_exact"
+        elif outcome == "reclassified":
+            dest = str(item.get("resolved_to") or item.get("new_type") or "")
+            if dest in ("matched_with_diff", "source_only", "target_only"):
+                moves[token] = dest
+    if not moves:
+        return {}
+
+    src_cands = recon_tool._candidate_columns_for_field(source_key_field, "source")
+    tgt_cands = recon_tool._candidate_columns_for_field(target_key_field, "target")
+    moved_rows: dict[str, list] = {name: [] for name in _COMPARISON_BUCKETS}
+    tally: dict[str, int] = {}
+    for bucket in ("matched_with_diff", "source_only", "target_only"):
+        df = diff_result.get(bucket)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        keep_mask: list[bool] = []
+        for _, row in df.iterrows():
+            nrow = recon_tool._normalize_dataframe_row(row)
+            token = _normalize_key_token(recon_tool._resolve_row_value(nrow, src_cands)) or \
+                _normalize_key_token(recon_tool._resolve_row_value(nrow, tgt_cands))
+            dest = moves.get(token)
+            if dest and dest != bucket:
+                moved_rows[dest].append(row)
+                tally[dest] = tally.get(dest, 0) + 1
+                keep_mask.append(False)
+            else:
+                keep_mask.append(True)
+        if not all(keep_mask):
+            diff_result[bucket] = df[keep_mask]
+    for dest, rows in moved_rows.items():
+        if not rows:
+            continue
+        add_df = pd.DataFrame(rows)
+        existing = diff_result.get(dest)
+        if isinstance(existing, pd.DataFrame) and not existing.empty:
+            diff_result[dest] = pd.concat([existing, add_df], ignore_index=True)
+        else:
+            diff_result[dest] = add_df
+    return tally
+
+
 def build_full_recon_frames(
     *,
     run: dict,

@@ -16,7 +16,7 @@ import logging
 import re
 import shutil
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -3464,6 +3464,46 @@ def _handle_recon_diff_digestion(arguments: dict[str, Any]) -> dict[str, Any]:
         review_round=review_round,
         digestion_meta=meta,
     )
+
+    # Refresh the period rollup so post-digestion counts/amounts flow into the daily digest
+    # (the digest reads recon_period_rollup, which the digestion writeback above does not touch).
+    # Best-effort: re-run the full comparison over the same frames, fold in the digestion outcomes,
+    # and re-persist the rollup via the canonical engine. A failure here must NEVER fail digestion —
+    # worst case the rollup stays at its pre-digestion value (current behaviour, no regression).
+    rollup_refreshed = False
+    try:
+        from recon.mcp_server import recon_tool as _recon_tool
+
+        refreshed_diff = _recon_tool._execute_comparison(
+            df_source=left_df,
+            df_target=right_df,
+            key_mappings=key_mappings,
+            compare_columns_config=compare_columns_config,
+            rule_id=recon_rule_code,
+            key_columns_config=key_columns_config,
+        )
+        diff_digestion.apply_outcomes_to_diff_result(
+            refreshed_diff,
+            results,
+            source_key_field=source_key_field,
+            target_key_field=target_key_field,
+        )
+        run_context = dict(run.get("run_context_json") or {})
+        run_context["execution_run_id"] = run_id
+        rollup_cfg = dict(run_context.get("rollup") or {})
+        if rollup_cfg and not rollup_cfg.get("as_of_ts"):
+            rollup_cfg["as_of_ts"] = datetime.now(timezone.utc).isoformat()
+            run_context["rollup"] = rollup_cfg
+        rollup_result: dict[str, Any] = {}
+        _recon_tool._maybe_attach_period_rollup(
+            rollup_result, refreshed_diff, {"run_context": run_context}
+        )
+        rollup_refreshed = str(rollup_result.get("period_rollup_status") or "") == "succeeded"
+    except Exception as exc:  # noqa: BLE001 — best-effort, digestion already committed
+        logger.warning(
+            "[recon][diff_digestion] run %s 消化后 rollup 刷新失败(不影响消化): %s", run_id, exc
+        )
+
     return {
         "success": True,
         "resolved": writeback["resolved"],
@@ -3471,6 +3511,7 @@ def _handle_recon_diff_digestion(arguments: dict[str, Any]) -> dict[str, Any]:
         "kept": writeback["kept"],
         "open_counts": writeback["open_counts"],
         "review_round": review_round,
+        "rollup_refreshed": rollup_refreshed,
         "fetch_degraded": bool(meta.get("fetch_degraded")),
     }
 
