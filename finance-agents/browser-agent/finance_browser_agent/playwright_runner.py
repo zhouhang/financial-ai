@@ -1645,18 +1645,34 @@ def _type_like_human(
 
 def _close_open_datepicker_overlay(page: Any) -> None:
     """Close a previous date-picker popup before targeting the next readonly input."""
+    # Alibaba Next/Fusion overlay (some 淘系 pickers) — closes on Escape.
     overlay = _safe_first_locator(page, ".next-overlay-wrapper.opened")
-    if overlay is None or not _locator_visible(overlay, timeout_ms=200):
-        return
-    keyboard = getattr(page, "keyboard", None)
-    press = getattr(keyboard, "press", None)
-    if not callable(press):
-        return
-    try:
-        press("Escape")
-        _wait_for_timeout(page, 200)
-    except Exception:
-        return
+    if overlay is not None and _locator_visible(overlay, timeout_ms=200):
+        keyboard = getattr(page, "keyboard", None)
+        press = getattr(keyboard, "press", None)
+        if callable(press):
+            try:
+                press("Escape")
+                _wait_for_timeout(page, 200)
+            except Exception:
+                pass
+
+    # JD legacy calendar (div.Cal): not a Next overlay and ignores Escape. If left open after
+    # setting 开始时间, its absolutely-positioned popup overlaps and intercepts the 结束时间 input
+    # click (卡住). Dismiss with an outside mouse click so its internal open-state resets cleanly.
+    cal = _safe_first_locator(page, "div.Cal")
+    if cal is not None and _locator_visible(cal, timeout_ms=200):
+        try:
+            page.evaluate(
+                """() => {
+                  ['mousedown', 'mouseup', 'click'].forEach(t =>
+                    document.body.dispatchEvent(
+                      new MouseEvent(t, {bubbles: true, cancelable: true, view: window})));
+                }"""
+            )
+            _wait_for_timeout(page, 200)
+        except Exception:
+            pass
 
 
 def _set_date_value(
