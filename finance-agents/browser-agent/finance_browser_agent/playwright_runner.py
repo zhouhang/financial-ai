@@ -69,6 +69,14 @@ _AUTH_REDIRECT_MARKERS = (
     "请先登录",
     "登录后继续",
 )
+# Grace window to let a QianNiu/Taobao transient login/havana redirect resolve before we commit
+# to AUTH_EXPIRED (which pauses the cron + notifies the shop owner to re-login). A valid session
+# can briefly route through a login URL; 15s was too tight and produced false AUTH_EXPIRED.
+# Env-tunable; floored at the old 15s so it can only ever be widened.
+_AUTH_REDIRECT_GRACE_MS = max(
+    15000,
+    int(os.getenv("AUTH_REDIRECT_GRACE_MS", "30000") or "30000"),
+)
 _RISK_MARKERS = (
     "验证码",
     "请完成下列验证",
@@ -626,7 +634,9 @@ def _execute_action(
         if detected in {"AUTH_EXPIRED", "RISK_VERIFICATION"} and allow_auth_redirect:
             return {"auth_required": True}
         if detected == "AUTH_EXPIRED":
-            auth_redirect_grace_ms = int(action.get("auth_redirect_grace_ms") or 15000)
+            auth_redirect_grace_ms = int(
+                action.get("auth_redirect_grace_ms") or _AUTH_REDIRECT_GRACE_MS
+            )
             detected = _wait_for_transient_auth_redirect_to_clear(
                 page,
                 timeout_ms=auth_redirect_grace_ms,

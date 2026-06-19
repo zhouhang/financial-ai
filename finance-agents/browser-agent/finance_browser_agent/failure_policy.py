@@ -17,7 +17,6 @@ from dataclasses import dataclass
 
 DETERMINISTIC_FAILURES = frozenset(
     {
-        "PAGE_CHANGED",
         "AUTH_EXPIRED",
         "RISK_VERIFICATION",
         "DATA_MISMATCH",
@@ -36,6 +35,14 @@ TRANSIENT_FAILURES = frozenset(
         "OTHER",
     }
 )
+
+# PAGE_CHANGED is overloaded: most occurrences are transient render/latency hiccups that merely
+# look like a selector miss (slow date-picker, async export not yet painted, brief interstitial),
+# not a real page revision. So give it ONE short retry before committing to the terminal 'stale'
+# pause. A genuine page change still fails the retry ~5 min later and pauses exactly as before
+# (binding transition fires only on terminal failure); transient flakes self-heal without a pause.
+_PAGE_CHANGED_RETRY_ATTEMPTS = 2  # initial try + 1 retry
+_PAGE_CHANGED_RETRY_DELAY_SECONDS = 300
 
 _BROWSER_CLOSED_MESSAGE_MARKERS = (
     "target page, context or browser has been closed",
@@ -63,6 +70,13 @@ def classify_failure(reason: str | None, *, error_message: str | None = None) ->
     message = str(error_message or "").strip().lower()
     if any(marker in message for marker in _BROWSER_CLOSED_MESSAGE_MARKERS):
         normalized = "BROWSER_CLOSED"
+    if normalized == "PAGE_CHANGED":
+        return FailurePolicy(
+            normalized_reason="PAGE_CHANGED",
+            retryable=True,
+            max_attempts=_PAGE_CHANGED_RETRY_ATTEMPTS,
+            retry_delay_seconds=_PAGE_CHANGED_RETRY_DELAY_SECONDS,
+        )
     if normalized in DETERMINISTIC_FAILURES:
         return FailurePolicy(normalized_reason=normalized, retryable=False)
     if normalized not in TRANSIENT_FAILURES:
