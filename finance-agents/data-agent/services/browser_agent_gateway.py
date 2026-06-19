@@ -36,6 +36,16 @@ _DOMAIN_TOOL_MAP: dict[str, str] = {
 }
 
 
+def _force_handoff_to_alert_recipient() -> bool:
+    """人工接管通知是否统一发给采集告警接收人(.env BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD,周行)。
+
+    默认开启:当前采集账号都是该接管人的、风控短信码也发到其手机,所以接管必须找他。
+    置 HANDOFF_FORCE_ALERT_RECIPIENT=false 可回到"按对账责任人(店主)路由接管通知"的旧行为。
+    在调用时读取(非模块级常量),便于测试用 monkeypatch 切换。
+    """
+    return os.getenv("HANDOFF_FORCE_ALERT_RECIPIENT", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _resolve_handoff_recipient(adapter: Any, owner: dict[str, Any]) -> str:
     recipient = str(owner.get("identifier") or owner.get("user_id") or "").strip()
     owner_name = str(owner.get("name") or owner.get("display_name") or "").strip()
@@ -186,7 +196,20 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
     recipient = str(owner.get("identifier") or owner.get("user_id") or "").strip()
     reason = str(msg.get("reason") or "RISK_VERIFICATION")
     notified = False
-    if recipient:
+    if _force_handoff_to_alert_recipient():
+        # 人工接管通知统一发给 .env BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD(周行):采集账号与
+        # 风控短信验证码都在该接管人处,接管链接必须发给他,而非店铺责任人(店主收不到码也接管不了)。
+        # 对账差异通知仍按 owner(店主)经各自通道发送(不走这里),不受影响。
+        # 设 HANDOFF_FORCE_ALERT_RECIPIENT=false 可恢复"按对账责任人路由"的旧行为。
+        logger.info("handoff 统一发给采集接管人(周行) sync_job_id=%s", sync_job_id)
+        notified = _notify_handoff_fallback(
+            company_id=company_id,
+            sync_job_id=sync_job_id,
+            shop_id=str(msg.get("shop_id") or ""),
+            reason=reason,
+            link=link,
+        )
+    elif recipient:
         # 配了责任人:走 per-company 通道。通道缺失/发送失败只记日志,不兜底(兜底仅针对"没配责任人")。
         if channel_id:
             channel = load_company_channel_config_by_id(channel_id=channel_id)

@@ -15,6 +15,8 @@ def _conn() -> gw.BrowserAgentConnection:
 
 def test_risk_waiting_creates_session_and_notifies_owner(monkeypatch):
     gw._NOTIFIED_RISK_JOBS.clear()
+    # 旧行为:按对账责任人(店主)路由接管通知。需显式关闭统一接管人路由。
+    monkeypatch.setenv("HANDOFF_FORCE_ALERT_RECIPIENT", "false")
     calls = {"create": 0, "load_channel": [], "resolve": [], "notify": []}
 
     async def fake_call(tool, args):
@@ -99,6 +101,7 @@ def test_risk_waiting_creates_session_and_notifies_owner(monkeypatch):
 
 def test_risk_waiting_without_owner_falls_back_to_alert_recipient(monkeypatch):
     gw._NOTIFIED_RISK_JOBS.clear()
+    monkeypatch.setenv("HANDOFF_FORCE_ALERT_RECIPIENT", "false")
     calls = {"adapter": 0, "load_channel": 0, "fallback": []}
 
     async def fake_call(tool, args):
@@ -164,6 +167,7 @@ def test_risk_waiting_without_owner_falls_back_to_alert_recipient(monkeypatch):
 def test_owner_present_but_send_fails_does_not_fall_back(monkeypatch):
     # 收窄后:配了责任人但发送失败,不走兜底(兜底仅针对"没配责任人")。
     gw._NOTIFIED_RISK_JOBS.clear()
+    monkeypatch.setenv("HANDOFF_FORCE_ALERT_RECIPIENT", "false")
     calls = {"fallback": 0}
 
     async def fake_call(tool, args):
@@ -209,6 +213,63 @@ def test_owner_present_but_send_fails_does_not_fall_back(monkeypatch):
     assert result["ok"] is True
     assert result["data"]["notified"] is False
     assert calls["fallback"] == 0  # 配了责任人 → 不兜底
+
+
+def test_force_alert_recipient_routes_handoff_to_zhouxing_even_with_owner(monkeypatch):
+    # 默认开启:即使配了对账责任人(店主),人工接管通知也统一发给采集接管人(周行)兜底通道,
+    # 不走 per-company owner 通道。对账差异通知不在此路径,不受影响。
+    gw._NOTIFIED_RISK_JOBS.clear()
+    monkeypatch.delenv("HANDOFF_FORCE_ALERT_RECIPIENT", raising=False)  # 默认即开启
+    calls = {"fallback": [], "adapter": 0, "load_channel": 0}
+
+    async def fake_call(tool, args):
+        if tool == "browser_handoff_session_create":
+            return {
+                "success": True,
+                "handoff_session_id": "h9",
+                "handoff_token": "TKN9",
+                "status": "pending",
+                "channel_config_id": "chan1",
+                "owner": {"identifier": "u1", "name": "万文波"},
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(gw, "call_mcp_tool", fake_call)
+
+    def unexpected_adapter(**kwargs):
+        calls["adapter"] += 1
+        raise AssertionError("force-alert-recipient handoff must not use the per-company owner channel")
+
+    def unexpected_load_channel(**kwargs):
+        calls["load_channel"] += 1
+        raise AssertionError("force-alert-recipient handoff must not load the per-company channel")
+
+    monkeypatch.setattr(gw, "get_notification_adapter", unexpected_adapter)
+    monkeypatch.setattr(gw, "load_company_channel_config_by_id", unexpected_load_channel)
+
+    def fake_fallback(*, company_id, sync_job_id, shop_id, reason, link):
+        calls["fallback"].append({"sync_job_id": sync_job_id, "link": link})
+        return True
+
+    monkeypatch.setattr(gw, "_notify_handoff_fallback", fake_fallback)
+    monkeypatch.setenv("TALLY_PUBLIC_BASE_URL", "https://dev.tallyai.cn/api")
+
+    result = asyncio.run(
+        gw.handle_domain_message(
+            _conn(),
+            {
+                "type": "risk_waiting", "id": "e1", "sync_job_id": "j-force",
+                "reason": "AUTH_EXPIRED", "company_id": "c1", "shop_id": "s1",
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["notified"] is True
+    assert calls["adapter"] == 0 and calls["load_channel"] == 0  # owner 通道未被使用
+    assert len(calls["fallback"]) == 1
+    assert calls["fallback"][0]["sync_job_id"] == "j-force"
+    assert calls["fallback"][0]["link"] == "https://dev.tallyai.cn/handoff?t=TKN9"
 
 
 def test_handoff_fallback_reuses_browser_alert_service(monkeypatch):
