@@ -28,7 +28,7 @@ from datetime import date
 from typing import Any
 
 from finance_browser_agent.credentials import inject_credentials_into_params
-from finance_browser_agent.failure_policy import classify_failure
+from finance_browser_agent.failure_policy import classify_failure, page_changed_retry_delay_seconds
 from finance_browser_agent.playwright_runner import sanitize_profile_key
 from finance_browser_agent.profile_locks import ProfileLockRegistry
 
@@ -201,6 +201,13 @@ class BrowserDispatcherLoop:
                     shop_id_str,
                 )
 
+        # PAGE_CHANGED uses an escalating backoff (5 min then 15 min), keyed on the attempt that
+        # just failed — the claimed job carries the post-increment current_attempt.
+        retry_delay_seconds = policy.retry_delay_seconds
+        if policy.normalized_reason == "PAGE_CHANGED":
+            retry_delay_seconds = page_changed_retry_delay_seconds(
+                int((job or {}).get("current_attempt") or 1)
+            )
         await self.client.mark_browser_job_failed(
             {
                 "sync_job_id": sync_job_id,
@@ -208,7 +215,7 @@ class BrowserDispatcherLoop:
                 "error_message": error_message,
                 "retryable": policy.retryable,
                 "max_attempts": policy.max_attempts,
-                "retry_delay_seconds": policy.retry_delay_seconds,
+                "retry_delay_seconds": retry_delay_seconds,
             }
         )
         logger.warning(

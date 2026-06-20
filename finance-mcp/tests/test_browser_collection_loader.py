@@ -173,8 +173,46 @@ def test_browser_collection_records_loader_accepts_date_field_metadata(monkeypat
         "收支账单",
     )
 
-    assert list(df["订单号"]) == ["order-001"]
-    assert list(df["订单实际金额（元）"]) == ["103"]
+    # date_field 的 filter 值是纯日期(date-only),现在这类业务日二次过滤被跳过(数据范围由
+    # biz_date 列在 _load_browser_collection_record_rows 层收口),所以两条都保留 ——
+    # payload 日期字段不再做第二道过滤。
+    assert list(df["订单号"]) == ["order-001", "order-002"]
+    assert list(df["订单实际金额（元）"]) == ["103", "88"]
+
+
+def test_date_only_filter_does_not_empty_nonempty_collection(monkeypatch):
+    """雷系京东账单回归:采到的行(biz_date 列已收口)其 payload 日期字段都 != 业务日时,
+    旧逻辑会在内存里按 date-only 过滤成 0 并报"过滤后为空"。现在 date-only 过滤被跳过,
+    采到的行保留、对账照常跑;非日期 filter 仍正常生效(见下一个用例)。"""
+    monkeypatch.setattr(
+        dataset_loader,
+        "_table_columns",
+        lambda table_name: {"data_source_id", "dataset_id", "biz_date", "payload", "captured_at"},
+    )
+    monkeypatch.setattr(
+        dataset_loader,
+        "_load_browser_collection_record_rows",
+        lambda *, source_key, query: [
+            {"payload": {"订单号": "o1", "费用发生时间": "2026-06-18 10:00:00"}},
+            {"payload": {"订单号": "o2", "费用发生时间": "2026-06-17 09:00:00"}},
+        ],
+    )
+
+    df = dataset_loader.load_dataset_as_df(
+        {
+            "source_type": "browser_collection_records",
+            "source_key": "source-001",
+            "query": {
+                "dataset_id": "dataset-001",
+                "biz_date": "2026-06-19",
+                "date_field": "费用发生时间",
+                "filters": {"费用发生时间": "2026-06-19"},
+            },
+        },
+        "京东账单",
+    )
+
+    assert list(df["订单号"]) == ["o1", "o2"]
 
 
 def test_load_browser_collection_records_applies_payload_filters(monkeypatch):

@@ -90,6 +90,23 @@ def _is_scalar_filter_value(value: Any) -> bool:
     return isinstance(value, (str, int, float, bool)) or value is None
 
 
+def _is_date_only_filter_value(value: Any) -> bool:
+    """Detect a redundant business-date re-filter — a date-only scalar like ``'2026-06-19'``.
+
+    Collection already stamps each row with a ``biz_date`` column and the SQL loaders scope by it,
+    so an additional in-memory filter on a payload date field (确认收货时间/费用发生时间/发生时间)
+    re-filters by a timestamp that often differs from the run's biz_date (T+N settlement lag,
+    datetime-vs-date drift) and wrongly empties a non-empty collection — that was the
+    "过滤后为空" false failure. These date-only filter values are skipped in-memory, mirroring the
+    SQL loaders' ``_DATE_ONLY_RE`` skip; non-date filters and the biz_date column scope are kept.
+    """
+    return (
+        _is_scalar_filter_value(value)
+        and value is not None
+        and bool(_DATE_ONLY_RE.fullmatch(str(value).strip()))
+    )
+
+
 def _is_db_filter_value(value: Any) -> bool:
     if _is_scalar_filter_value(value):
         return True
@@ -1463,6 +1480,8 @@ def _load_from_browser_collection_records(dataset_ref: dict[str, Any], table_nam
         field_name = str(field or "").strip()
         if not field_name:
             continue
+        if _is_date_only_filter_value(value):
+            continue  # 跳过冗余的业务日二次过滤(见 _is_date_only_filter_value)
         if field_name not in df.columns:
             if field_name in columns:
                 continue
@@ -1514,6 +1533,8 @@ def _load_from_platform_order_lines(dataset_ref: dict[str, Any], table_name: str
         field_name = str(field or "").strip()
         if not field_name:
             continue
+        if _is_date_only_filter_value(value):
+            continue  # 跳过冗余的业务日二次过滤(见 _is_date_only_filter_value)
         if field_name not in df.columns:
             if field_name in columns:
                 continue
@@ -1568,6 +1589,8 @@ def _load_from_platform_alipay_bill_lines(dataset_ref: dict[str, Any], table_nam
         field_name = str(field or "").strip()
         if not field_name:
             continue
+        if _is_date_only_filter_value(value):
+            continue  # 跳过冗余的业务日二次过滤(见 _is_date_only_filter_value)
         if field_name not in df.columns:
             if field_name in columns:
                 continue
