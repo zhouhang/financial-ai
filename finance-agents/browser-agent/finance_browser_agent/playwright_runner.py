@@ -2393,7 +2393,6 @@ def _wait_for_post_login_selector(
     last_error: Exception | None = None
     last_detected: str | None = None
     risk_detected = False
-    auth_handoff_detected = False
     deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
     while time.monotonic() <= deadline:
         for context in contexts:
@@ -2438,33 +2437,11 @@ def _wait_for_post_login_selector(
                             handoff_event_loop=handoff_event_loop,
                             chrome=chrome,
                         )
-                elif detected == "AUTH_EXPIRED" and not auth_handoff_detected:
-                    auth_handoff_detected = True
-                    manual_timeout_ms = int(run_config.risk_manual_timeout_ms if run_config else 0)
-                    if manual_timeout_ms > 0:
-                        deadline = max(deadline, time.monotonic() + manual_timeout_ms / 1000)
-                        logger.warning(
-                            "browser auth expired waiting for manual completion: timeout_ms=%s",
-                            manual_timeout_ms,
-                        )
-                        _notify_risk_waiting("AUTH_EXPIRED")
-                        _wait_for_risk_to_clear_with_handoff(
-                            page,
-                            contexts,
-                            timeout_ms=manual_timeout_ms,
-                            poll_interval_ms=1000,
-                            sync_job_id=sync_job_id,
-                            coordinator=handoff_coordinator,
-                            backend_factory=backend_factory,
-                            handoff_event_loop=handoff_event_loop,
-                            chrome=chrome,
-                            blocking_states={"AUTH_EXPIRED", "RISK_VERIFICATION"},
-                            still_blocked_reason="auth expired or verification still blocked",
-                        )
+                # AUTH_EXPIRED is NOT handed off: keep polling for the post-login selector until the
+                # deadline (lets a transient login redirect clear and the page reuse a valid session);
+                # if it never appears we raise AUTH_EXPIRED below, which the job-level policy retries once.
     if risk_detected:
         raise BrowserActionError("RISK_VERIFICATION", f"post-login risk verification not completed: {last_error}")
-    if auth_handoff_detected:
-        raise BrowserActionError("AUTH_EXPIRED", f"post-login auth expired not completed: {last_error}")
     if last_detected:
         raise BrowserActionError(last_detected, f"post-login detected {last_detected}: {last_error}")
     raise BrowserActionError("PAGE_CHANGED", f"post-login selector not found after login: {last_error}")

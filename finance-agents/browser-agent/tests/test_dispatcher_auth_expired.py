@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -19,7 +18,6 @@ import pytest
 
 from finance_browser_agent import data_agent_ws as data_agent_ws_module
 from finance_browser_agent.data_agent_ws import DataAgentWsClient
-from finance_browser_agent import dispatcher_loop as dl_module
 from finance_browser_agent.playbook_interpreter import validate_step_actions
 from finance_browser_agent import playwright_runner as pr
 from finance_browser_agent.dispatcher_loop import BrowserDispatcherLoop
@@ -292,19 +290,11 @@ class _FakeLoginAlreadyAtShopPickerPage(_FakePostLoginSelectorPage):
         raise RuntimeError("login fields are not visible")
 
 
-@pytest.fixture(autouse=True)
-def reset_notified_dict():
-    """Isolate _AUTH_EXPIRED_NOTIFIED between tests."""
-    dl_module._AUTH_EXPIRED_NOTIFIED.clear()
-    yield
-    dl_module._AUTH_EXPIRED_NOTIFIED.clear()
-
-
 # ---------------------------------------------------------------------------
-# Test 1: AUTH_EXPIRED triggers exactly one notification
+# AUTH_EXPIRED is retryable and never opens a handoff
 # ---------------------------------------------------------------------------
 
-async def test_auth_expired_triggers_notification():
+async def test_auth_expired_does_not_trigger_handoff_and_is_retryable():
     result = {
         "status": "failed",
         "fail_reason": "AUTH_EXPIRED",
@@ -315,14 +305,19 @@ async def test_auth_expired_triggers_notification():
     outcome = await loop.run_once()
 
     assert outcome["status"] == "failed"
-    assert len(risk_calls) == 1
-    assert risk_calls[0]["reason"] == "AUTH_EXPIRED"
-    assert risk_calls[0]["shop_id"] == "shop-42"
-    assert risk_calls[0]["company_id"] == "company-99"
+    # AUTH_EXPIRED never opens a handoff — human takeover is reserved for verification codes.
+    assert risk_calls == []
+    # It is retryable: one delayed retry to self-heal a misjudged login state / a sibling re-login.
     client.mark_browser_job_failed.assert_called_once()
+    payload = client.mark_browser_job_failed.call_args.args[0]
+    assert payload["fail_reason"] == "AUTH_EXPIRED"
+    assert payload["retryable"] is True
+    assert payload["max_attempts"] == 2
 
 
-async def test_auth_expired_not_renotified_after_live_handoff_callback():
+async def test_auth_expired_callback_does_not_open_handoff():
+    # Defensive: even if a runner signals on_risk_waiting("AUTH_EXPIRED"), the dispatcher must NOT
+    # open a handoff. Only verification codes (RISK_VERIFICATION) reach a human.
     risk_calls: list[dict] = []
 
     async def fake_report_risk_waiting(
@@ -350,7 +345,7 @@ async def test_auth_expired_not_renotified_after_live_handoff_callback():
         return {
             "status": "failed",
             "fail_reason": "AUTH_EXPIRED",
-            "error_info": {"message": "manual handoff timed out"},
+            "error_info": {"message": "login redirect"},
         }
 
     loop = BrowserDispatcherLoop(client=client, runner=runner, max_concurrency=1)
@@ -358,8 +353,7 @@ async def test_auth_expired_not_renotified_after_live_handoff_callback():
     outcome = await loop.run_once()
 
     assert outcome["status"] == "failed"
-    assert len(risk_calls) == 1
-    assert risk_calls[0]["reason"] == "AUTH_EXPIRED"
+    assert risk_calls == []
     client.mark_browser_job_failed.assert_called_once()
 
 
@@ -386,30 +380,7 @@ async def test_dispatcher_passes_event_loop_to_runner_message():
 
 
 # ---------------------------------------------------------------------------
-# Test 2: Second AUTH_EXPIRED for same shop same day → deduped (no second call)
-# ---------------------------------------------------------------------------
-
-async def test_auth_expired_deduped_same_shop_same_day():
-    result = {
-        "status": "failed",
-        "fail_reason": "AUTH_EXPIRED",
-        "error_info": {"message": "login redirect"},
-    }
-    loop, client, risk_calls = _make_loop(result)
-
-    # Pre-mark today's notification for this shop as already sent
-    dl_module._AUTH_EXPIRED_NOTIFIED["shop-42"] = date.today()
-
-    outcome = await loop.run_once()
-
-    assert outcome["status"] == "failed"
-    # No new notification because deduped
-    assert len(risk_calls) == 0
-    client.mark_browser_job_failed.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Test 3: RISK_VERIFICATION does NOT trigger the AUTH_EXPIRED notification path
+# RISK_VERIFICATION does NOT trigger any notification from the failure path
 # ---------------------------------------------------------------------------
 
 async def test_risk_verification_does_not_trigger_auth_expired_notification():
@@ -448,12 +419,8 @@ async def test_target_closed_failure_is_reported_as_terminal_browser_closed():
     assert payload["retryable"] is False
 
 
-# ---------------------------------------------------------------------------
-# Test 4: Different shops on the same day each get their own notification
-# ---------------------------------------------------------------------------
-
-async def test_auth_expired_different_shops_each_notified():
-    """Two distinct shops both fail with AUTH_EXPIRED → two notifications sent."""
+async def test_auth_expired_never_notifies_across_shops():
+    """AUTH_EXPIRED never opens a handoff for any shop (no per-shop notification anymore)."""
     risk_calls: list[dict] = []
 
     async def fake_report_risk_waiting(
@@ -470,7 +437,6 @@ async def test_auth_expired_different_shops_each_notified():
     }
 
     jobs = [_make_job(job_id="j1", shop_id="shop-A"), _make_job(job_id="j2", shop_id="shop-B")]
-    job_iter = iter(jobs)
 
     client = AsyncMock()
     client.claim_browser_job = AsyncMock(side_effect=[{"job": j} for j in jobs])
@@ -488,10 +454,7 @@ async def test_auth_expired_different_shops_each_notified():
     await loop.run_once()  # shop-A
     await loop.run_once()  # shop-B
 
-    notified_shops = {c["shop_id"] for c in risk_calls}
-    assert "shop-A" in notified_shops
-    assert "shop-B" in notified_shops
-    assert len(risk_calls) == 2
+    assert risk_calls == []
 
 
 class _FakeWs:

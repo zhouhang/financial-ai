@@ -1,9 +1,11 @@
 """Browser collection failure classification.
 
-Deterministic failures (page changed, login expired, risk verification triggered, data quality
-mismatch, or upstream-known unhealthy binding) must not be retried — the cause won't fix itself
-within the retry window. Transient failures (agent offline / timeout / Chrome crash / network
-hiccup / unknown OTHER) get up to 3 retries spaced ~30 min apart.
+Deterministic failures (risk verification triggered, data quality mismatch, or upstream-known
+unhealthy binding) must not be retried — the cause won't fix itself within the retry window.
+Transient failures (agent offline / timeout / Chrome crash / network hiccup / unknown OTHER) get up
+to 3 retries spaced ~30 min apart. PAGE_CHANGED and AUTH_EXPIRED are special-cased: PAGE_CHANGED gets
+2 escalating retries; AUTH_EXPIRED gets 1 delayed retry (often self-heals via reload or a sibling
+re-login) and never opens a handoff (handoff is reserved for verification codes).
 
 Used by the browser-agent dispatcher loop after a runner returns a failed TASK_RESULT, and by the
 cloud-side ``mark_browser_sync_job_failed`` to decide whether to reschedule the sync_job back to
@@ -17,7 +19,6 @@ from dataclasses import dataclass
 
 DETERMINISTIC_FAILURES = frozenset(
     {
-        "AUTH_EXPIRED",
         "RISK_VERIFICATION",
         "DATA_MISMATCH",
         "UNHEALTHY_BINDING",
@@ -45,6 +46,16 @@ TRANSIENT_FAILURES = frozenset(
 # attempts and pauses (only ~20 min later; binding transition fires only on terminal failure).
 _PAGE_CHANGED_RETRY_ATTEMPTS = 3  # initial try + 2 retries
 _PAGE_CHANGED_RETRY_DELAYS_SECONDS = (300, 900)  # backoff after attempt 1, after attempt 2
+
+# AUTH_EXPIRED is no longer deterministic. It is frequently self-healing: a misjudged login state
+# (auth_check false-negative on a slow/changed page) clears on reload, and a shared-profile sibling
+# job re-logging in refreshes the session so a later attempt reuses it without any login. So give it
+# ONE delayed retry — gated by auth_check, it re-checks login state first and only re-attempts a
+# login if still genuinely logged out (at most one extra login, not anti-bot hammering). A real
+# expiry that no retry can fix exhausts the retry, goes terminal, and pauses the binding. AUTH_EXPIRED
+# does NOT open a handoff — human takeover is reserved for verification codes (RISK_VERIFICATION).
+_AUTH_EXPIRED_RETRY_ATTEMPTS = 2  # initial try + 1 retry
+_AUTH_EXPIRED_RETRY_DELAY_SECONDS = 300  # 5 min: lets a sibling refresh the session / a transient redirect clear
 
 
 def page_changed_retry_delay_seconds(current_attempt: int) -> int:
@@ -92,6 +103,13 @@ def classify_failure(reason: str | None, *, error_message: str | None = None) ->
             retryable=True,
             max_attempts=_PAGE_CHANGED_RETRY_ATTEMPTS,
             retry_delay_seconds=_PAGE_CHANGED_RETRY_DELAYS_SECONDS[0],
+        )
+    if normalized == "AUTH_EXPIRED":
+        return FailurePolicy(
+            normalized_reason="AUTH_EXPIRED",
+            retryable=True,
+            max_attempts=_AUTH_EXPIRED_RETRY_ATTEMPTS,
+            retry_delay_seconds=_AUTH_EXPIRED_RETRY_DELAY_SECONDS,
         )
     if normalized in DETERMINISTIC_FAILURES:
         return FailurePolicy(normalized_reason=normalized, retryable=False)
