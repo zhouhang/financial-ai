@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import date
 from typing import Any
 
 from finance_browser_agent.credentials import inject_credentials_into_params
@@ -33,11 +32,6 @@ from finance_browser_agent.playwright_runner import sanitize_profile_key
 from finance_browser_agent.profile_locks import ProfileLockRegistry
 
 logger = logging.getLogger(__name__)
-
-# Per-shop AUTH_EXPIRED notification dedup: shop_id → date of last notification.
-# A single shop often has two dataset jobs that both fail with AUTH_EXPIRED on the
-# same day; we only want to send one handoff notification per shop per day.
-_AUTH_EXPIRED_NOTIFIED: dict[str, date] = {}
 
 
 class BrowserDispatcherLoop:
@@ -91,9 +85,12 @@ class BrowserDispatcherLoop:
                 loop = asyncio.get_running_loop()
 
                 def _on_risk_waiting(reason: str = "RISK_VERIFICATION") -> None:
+                    # Handoff (human takeover) is for verification codes only. AUTH_EXPIRED never
+                    # opens a handoff — it self-heals via the job-level retry, or goes terminal and
+                    # pauses the binding. Ignore any AUTH_EXPIRED signal defensively.
+                    if str(reason or "") == "AUTH_EXPIRED":
+                        return
                     try:
-                        if str(reason or "") == "AUTH_EXPIRED":
-                            _AUTH_EXPIRED_NOTIFIED[str(job.get("shop_id") or "")] = date.today()
                         asyncio.run_coroutine_threadsafe(
                             self.client.report_risk_waiting(
                                 sync_job_id=str(job.get("id") or ""),
@@ -168,38 +165,10 @@ class BrowserDispatcherLoop:
         error_message = str((result.get("error_info") or {}).get("message") or "browser task failed")
         policy = classify_failure(str(result.get("fail_reason") or "OTHER"), error_message=error_message)
 
-        # AUTH_EXPIRED: fire a handoff notification so someone can re-login via
-        # the remote-control link.  Dedup per shop per day because the same shop
-        # typically has two dataset jobs that both fail on the same day.
-        if policy.normalized_reason == "AUTH_EXPIRED":
-            shop_id_str = str(job.get("shop_id") or "")
-            today = date.today()
-            if _AUTH_EXPIRED_NOTIFIED.get(shop_id_str) != today:
-                _AUTH_EXPIRED_NOTIFIED[shop_id_str] = today
-                try:
-                    await self.client.report_risk_waiting(
-                        sync_job_id=sync_job_id,
-                        reason="AUTH_EXPIRED",
-                        company_id=str(job.get("company_id") or ""),
-                        shop_id=shop_id_str,
-                        data_source_id=str(job.get("data_source_id") or ""),
-                    )
-                    logger.info(
-                        "browser auth expired notification sent: sync_job_id=%s shop_id=%s",
-                        sync_job_id,
-                        shop_id_str,
-                    )
-                except Exception:
-                    logger.exception(
-                        "browser auth expired notification failed: sync_job_id=%s", sync_job_id
-                    )
-            else:
-                logger.info(
-                    "browser auth expired notification deduped (already sent today): "
-                    "sync_job_id=%s shop_id=%s",
-                    sync_job_id,
-                    shop_id_str,
-                )
+        # AUTH_EXPIRED does NOT open a handoff (handoff is reserved for verification codes). It is
+        # retryable (see classify_failure): one delayed retry self-heals a misjudged login state or a
+        # shared-profile sibling re-login; a real expiry exhausts the retry, goes terminal, and pauses
+        # the binding.
 
         # PAGE_CHANGED uses an escalating backoff (5 min then 15 min), keyed on the attempt that
         # just failed — the claimed job carries the post-increment current_attempt.
