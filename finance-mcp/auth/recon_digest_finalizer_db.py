@@ -293,7 +293,7 @@ def _expected_plan_scope_sql(scope: dict[str, Any]) -> tuple[str, list[Any]]:
         return "AND p.plan_code = ANY(%s)", [plan_codes]
     # The current digest product is daily-only. Weekly/monthly/manual plans should
     # not block a T-1 daily digest unless the subscription explicitly names them.
-    return "AND p.schedule_type = 'daily'", []
+    return "AND p.schedule_type = 'daily' AND (p.plan_meta_json->'rollup'->>'enabled') = 'true'", []
 
 
 def _latest_runs_for_expected_plans(

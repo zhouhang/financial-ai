@@ -10813,6 +10813,8 @@ def list_execution_runs(
     company_id: str,
     scheme_code: str | None = None,
     plan_code: str | None = None,
+    started_at_from: str | None = None,
+    started_at_to: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict]:
@@ -10849,6 +10851,12 @@ def list_execution_runs(
                 if plan_code:
                     sql += " AND runs.plan_code = %s"
                     params.append(plan_code)
+                if started_at_from:
+                    sql += " AND runs.started_at >= %s"
+                    params.append(started_at_from)
+                if started_at_to:
+                    sql += " AND runs.started_at < (%s::date + INTERVAL '1 day')"
+                    params.append(started_at_to)
                 sql += " ORDER BY runs.created_at DESC LIMIT %s OFFSET %s"
                 params.extend([limit, offset])
                 cur.execute(sql, tuple(params))
@@ -10866,6 +10874,8 @@ def count_execution_runs(
     company_id: str,
     scheme_code: str | None = None,
     plan_code: str | None = None,
+    started_at_from: str | None = None,
+    started_at_to: str | None = None,
 ) -> int:
     """统计执行记录总数（与 list_execution_runs 同筛选条件，供分页显示总数）。"""
     conn_manager = get_conn()
@@ -10880,6 +10890,12 @@ def count_execution_runs(
                 if plan_code:
                     sql += " AND plan_code = %s"
                     params.append(plan_code)
+                if started_at_from:
+                    sql += " AND started_at >= %s"
+                    params.append(started_at_from)
+                if started_at_to:
+                    sql += " AND started_at < (%s::date + INTERVAL '1 day')"
+                    params.append(started_at_to)
                 cur.execute(sql, tuple(params))
                 row = cur.fetchone()
                 return int(row[0]) if row else 0

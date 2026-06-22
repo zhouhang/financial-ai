@@ -1256,6 +1256,8 @@ async def delete_execution_task_api(
 async def list_execution_runs(
     scheme_code: str = Query(""),
     plan_code: str = Query(""),
+    started_at_from: str = Query(""),
+    started_at_to: str = Query(""),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     authorization: Optional[str] = Header(None),
@@ -1267,6 +1269,8 @@ async def list_execution_runs(
         auth_token,
         scheme_code=scheme_code,
         plan_code=plan_code,
+        started_at_from=started_at_from,
+        started_at_to=started_at_to,
         limit=limit,
         offset=offset,
     )
