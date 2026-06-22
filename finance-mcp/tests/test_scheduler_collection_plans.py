@@ -14,7 +14,7 @@ from tools import data_sources
 
 
 @pytest.mark.anyio
-async def test_scheduler_collection_plans_include_taobao_two_hour_cron(monkeypatch) -> None:
+async def test_scheduler_collection_plans_skip_taobao_platform_oauth_schedule(monkeypatch) -> None:
     monkeypatch.setattr(
         data_sources,
         "_require_scheduler_user",
@@ -48,6 +48,8 @@ async def test_scheduler_collection_plans_include_taobao_two_hour_cron(monkeypat
         "get_unified_data_source_by_id",
         lambda company_id, data_source_id: {
             "id": data_source_id,
+            "source_kind": "platform_oauth",
+            "provider_code": "taobao",
             "status": "active",
             "is_enabled": True,
         },
@@ -63,17 +65,12 @@ async def test_scheduler_collection_plans_include_taobao_two_hour_cron(monkeypat
     )
 
     assert result["success"] is True
-    assert result["count"] == 1
-    plan = result["collection_plans"][0]
-    assert plan["dataset_id"] == "dataset-1"
-    assert plan["resource_key"] == "taobao_order_lines:shop-1"
-    assert plan["schedule_type"] == "cron"
-    assert plan["schedule_expr"] == "0 */2 * * *"
-    assert plan["date_field"] == "biz_date"
+    assert result["count"] == 0
+    assert result["collection_plans"] == []
 
 
 @pytest.mark.anyio
-async def test_scheduler_collection_plans_include_alipay_daily_bill_date_cron(monkeypatch) -> None:
+async def test_scheduler_collection_plans_skip_alipay_platform_oauth_schedule(monkeypatch) -> None:
     monkeypatch.setattr(
         data_sources,
         "_require_scheduler_user",
@@ -114,6 +111,62 @@ async def test_scheduler_collection_plans_include_alipay_daily_bill_date_cron(mo
         "get_unified_data_source_by_id",
         lambda company_id, data_source_id: {
             "id": data_source_id,
+            "source_kind": "platform_oauth",
+            "provider_code": "alipay",
+            "status": "active",
+            "is_enabled": True,
+        },
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_build_dataset_view",
+        lambda row, include_heavy=False: {"business_name": row["dataset_name"]},
+    )
+
+    result = await data_sources._handle_data_source_scheduler_list_collection_plans(
+        {"auth_token": "scheduler-token"}
+    )
+
+    assert result["success"] is True
+    assert result["count"] == 0
+    assert result["collection_plans"] == []
+
+
+@pytest.mark.anyio
+async def test_scheduler_collection_plans_include_api_schedule(monkeypatch) -> None:
+    monkeypatch.setattr(
+        data_sources,
+        "_require_scheduler_user",
+        lambda token: {"role": "system", "company_id": "company-1"},
+    )
+    monkeypatch.setattr(
+        data_sources,
+        "_list_datasets_with_compat",
+        lambda **kwargs: [
+            {
+                "id": "dataset-api-1",
+                "data_source_id": "source-api-1",
+                "dataset_code": "orders_api",
+                "dataset_name": "订单 API",
+                "resource_key": "api:orders",
+                "extract_config": {
+                    "date_field": "biz_date",
+                },
+                "sync_strategy": {
+                    "schedule_type": "daily",
+                    "schedule_expr": "09:30",
+                },
+                "publish_status": "published",
+                "is_enabled": True,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_unified_data_source_by_id",
+        lambda company_id, data_source_id: {
+            "id": data_source_id,
+            "source_kind": "api",
             "status": "active",
             "is_enabled": True,
         },
@@ -131,11 +184,11 @@ async def test_scheduler_collection_plans_include_alipay_daily_bill_date_cron(mo
     assert result["success"] is True
     assert result["count"] == 1
     plan = result["collection_plans"][0]
-    assert plan["resource_key"] == "alipay_bill:trade:shop-alipay-1"
-    assert plan["schedule_type"] == "cron"
-    assert plan["schedule_expr"] == "30 10 * * *"
-    assert plan["date_field"] == "bill_date"
-    assert plan["collection_config"]["bill_type"] == "trade"
+    assert plan["source_id"] == "source-api-1"
+    assert plan["dataset_id"] == "dataset-api-1"
+    assert plan["schedule_type"] == "daily"
+    assert plan["schedule_expr"] == "09:30"
+    assert plan["date_field"] == "biz_date"
 
 
 @pytest.mark.anyio
