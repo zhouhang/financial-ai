@@ -158,6 +158,14 @@ def test_finalize_blocks_when_rollup_missing_for_successful_plan(monkeypatch) ->
     assert result["completeness"]["missing_rollup_plan_codes"] == ["plan-001"]
 
 
+def test_expected_daily_digest_scope_only_includes_rollup_enabled_plans() -> None:
+    sql, params = recon_digest_finalizer_db._expected_plan_scope_sql({"mode": "company_all"})
+
+    assert params == []
+    assert "p.schedule_type = 'daily'" in sql
+    assert "(p.plan_meta_json->'rollup'->>'enabled') = 'true'" in sql
+
+
 def test_finalize_upserts_digest_when_gate_and_rollup_are_complete(monkeypatch) -> None:
     captured = _patch_conn(
         monkeypatch,

@@ -319,7 +319,7 @@ interface SchemeMetaSummary {
 const SCHEME_LIST_TEMPLATE =
   'minmax(0,1.8fr) minmax(180px,0.7fr) minmax(268px,auto)';
 const TASK_LIST_TEMPLATE =
-  'minmax(260px,1.7fr) minmax(360px,2.2fr) minmax(140px,0.75fr) minmax(96px,0.45fr) minmax(240px,auto)';
+  'minmax(240px,1.8fr) minmax(120px,0.55fr) minmax(86px,0.4fr) minmax(188px,auto)';
 const RUN_LIST_TEMPLATE =
   'minmax(0,2.4fr) minmax(150px,0.8fr) minmax(100px,0.55fr) minmax(120px,0.65fr) minmax(120px,0.65fr) minmax(210px,auto)';
 const DIFF_DIGESTION_POLL_ATTEMPTS = 12;
@@ -765,6 +765,20 @@ function toSortableTimestamp(value: string): number {
   if (!value) return 0;
   const timestamp = new Date(value).getTime();
   return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function buildRunListQuery(limit: number, offset: number, filters: { startedAtFrom: string; startedAtTo: string }): string {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (filters.startedAtFrom) {
+    params.set('started_at_from', filters.startedAtFrom);
+  }
+  if (filters.startedAtTo) {
+    params.set('started_at_to', filters.startedAtTo);
+  }
+  return params.toString();
 }
 
 function getOpenDiffCount(run: ReconCenterRunItem): number {
@@ -1346,10 +1360,6 @@ function resolveSampleOriginMeta(
     label: '样本数据',
     hint: '当前抽样来自数据集内置样本',
   };
-}
-
-function runPlanInputSideLabel(side: 'left' | 'right'): string {
-  return side === 'left' ? '左侧' : '右侧';
 }
 
 function pickDefaultRunPlanDateField(input: RunPlanInputDatasetDraft): string {
@@ -3114,6 +3124,8 @@ export default function ReconWorkspace({
   const [runsHasMore, setRunsHasMore] = useState(false);
   const [runsPageLoading, setRunsPageLoading] = useState(false);
   const [runsTotal, setRunsTotal] = useState(0);
+  const [runStartedAtFrom, setRunStartedAtFrom] = useState('');
+  const [runStartedAtTo, setRunStartedAtTo] = useState('');
   const [exceptionsByRunId, setExceptionsByRunId] = useState<Record<string, ReconRunExceptionDetail[]>>({});
   const [schemesByRunId, setSchemesByRunId] = useState<Record<string, ReconSchemeListItem>>({});
   const [availableChannels, setAvailableChannels] = useState<CollaborationChannelListItem[]>([]);
@@ -3231,15 +3243,6 @@ export default function ReconWorkspace({
     () => (selectedPlanScheme ? extractSchemeMeta(selectedPlanScheme) : null),
     [selectedPlanScheme],
   );
-  const selectedPlanInputDatasets = useMemo(
-    () => extractRunPlanInputDatasets(selectedPlanSchemeMeta),
-    [selectedPlanSchemeMeta],
-  );
-  const selectedPlanDateInputs = useMemo(
-    () => selectedPlanInputDatasets.filter((input) => input.requiresDateField),
-    [selectedPlanInputDatasets],
-  );
-
   useEffect(() => {
     aiProcSideDraftsRef.current = aiProcSideDrafts;
   }, [aiProcSideDrafts]);
@@ -3432,7 +3435,13 @@ export default function ReconWorkspace({
       const [schemeResponse, taskResponse, runResponse] = await Promise.all([
         fetchReconAutoApi(`/schemes?include_disabled=false&limit=${SCHEMES_PAGE_SIZE}&offset=0`, { headers }),
         fetchReconAutoApi(`/tasks?limit=${TASKS_PAGE_SIZE}&offset=0`, { headers }),
-        fetchReconAutoApi(`/runs?limit=${RUNS_PAGE_SIZE}&offset=0`, { headers }),
+        fetchReconAutoApi(
+          `/runs?${buildRunListQuery(RUNS_PAGE_SIZE, 0, {
+            startedAtFrom: '',
+            startedAtTo: '',
+          })}`,
+          { headers },
+        ),
       ]);
 
       const [schemeData, taskData, runData] = await Promise.all([
@@ -3511,15 +3520,22 @@ export default function ReconWorkspace({
     }
   }, [applyCenterPayload, authToken]);
 
-  const loadRunsPage = useCallback(async (nextPage: number): Promise<void> => {
+  const loadRunsPage = useCallback(async (
+    nextPage: number,
+    filtersOverride?: { startedAtFrom: string; startedAtTo: string },
+  ): Promise<void> => {
     if (!authToken) return;
     const targetPage = Math.max(0, nextPage);
     setRunsPageLoading(true);
     try {
       const headers = { Authorization: `Bearer ${authToken}` };
       const offset = targetPage * RUNS_PAGE_SIZE;
+      const filters = filtersOverride || {
+        startedAtFrom: runStartedAtFrom,
+        startedAtTo: runStartedAtTo,
+      };
       const response = await fetchReconAutoApi(
-        `/runs?limit=${RUNS_PAGE_SIZE}&offset=${offset}`,
+        `/runs?${buildRunListQuery(RUNS_PAGE_SIZE, offset, filters)}`,
         { headers },
       );
       const data = await response.json().catch(() => ({}));
@@ -3545,7 +3561,18 @@ export default function ReconWorkspace({
     } finally {
       setRunsPageLoading(false);
     }
-  }, [authToken, schemes, tasks]);
+  }, [authToken, runStartedAtFrom, runStartedAtTo, schemes, tasks]);
+
+  const handleApplyRunDateFilter = useCallback(() => {
+    void loadRunsPage(0);
+  }, [loadRunsPage]);
+
+  const handleClearRunDateFilter = useCallback(() => {
+    const emptyFilters = { startedAtFrom: '', startedAtTo: '' };
+    setRunStartedAtFrom('');
+    setRunStartedAtTo('');
+    void loadRunsPage(0, emptyFilters);
+  }, [loadRunsPage]);
 
   const refreshRunQuietly = useCallback(async (runId: string): Promise<ReconCenterRunItem | null> => {
     if (!authToken) return null;
@@ -5113,18 +5140,6 @@ export default function ReconWorkspace({
     const matchedScheme = schemes.find((s) => s.schemeCode === schemeCode);
     const schemeName = matchedScheme?.name || schemeCode;
     const matchedSchemeMeta = matchedScheme ? extractSchemeMeta(matchedScheme) : null;
-    const planInputDatasets = extractRunPlanInputDatasets(matchedSchemeMeta);
-    const missingDateInputs = planInputDatasets.filter(
-      (input) => input.requiresDateField && !toText(planDraft.dateFieldByInputKey[input.key]).trim(),
-    );
-    if (missingDateInputs.length > 0) {
-      setModalError(
-        `请先选择对账日期字段：${missingDateInputs
-          .map((input) => `${runPlanInputSideLabel(input.side)} ${input.displayName}`)
-          .join('、')}`,
-      );
-      return;
-    }
     const autoName = schemeName.trim() || '未命名对账任务';
     const inputBindings = buildRunPlanBindings(
       matchedSchemeMeta,
@@ -6010,9 +6025,9 @@ export default function ReconWorkspace({
         })
       : (
     <div className="overflow-x-auto rounded-[26px] border border-border bg-surface shadow-sm">
-      <div className="min-w-[1260px]">
+      <div className="min-w-[920px]">
         <ListHeader
-          columns={['任务名称', '对账日期字段', '运行计划', '状态', '操作']}
+          columns={['任务名称', '运行计划', '状态', '操作']}
           template={TASK_LIST_TEMPLATE}
         />
         {tasks.map((item) => {
@@ -6042,17 +6057,6 @@ export default function ReconWorkspace({
                 <p className="truncate text-xs leading-5 text-text-secondary">
                   {resolveChannelProviderLabel(item.channelConfigId)} 汇总：{item.summaryRecipient || '--'} · 责任：{item.ownerSummary || '--'}
                 </p>
-              </div>
-              <div className="min-w-0 space-y-1 text-sm leading-5 text-text-secondary" title={item.dateFieldSummary}>
-                {item.dateFieldLines.length > 0 ? (
-                  item.dateFieldLines.map((line) => (
-                    <p key={line} className="truncate">
-                      {line}
-                    </p>
-                  ))
-                ) : (
-                  <p>--</p>
-                )}
               </div>
               <span className="text-sm text-text-secondary">
                 {formatScheduleLabel(item.scheduleType, item.scheduleExpr)}
@@ -6121,7 +6125,46 @@ export default function ReconWorkspace({
   );
 
   const renderRunRows = () =>
-    runs.length === 0
+    <>
+      <div className="flex flex-wrap items-end gap-3 rounded-[26px] border border-border bg-surface px-5 py-4 shadow-sm">
+        <label className="min-w-[180px] flex-1">
+          <span className="text-xs font-medium text-text-secondary">开始日期</span>
+          <input
+            type="date"
+            value={runStartedAtFrom}
+            onChange={(event) => setRunStartedAtFrom(event.target.value)}
+            className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+          />
+        </label>
+        <label className="min-w-[180px] flex-1">
+          <span className="text-xs font-medium text-text-secondary">结束日期</span>
+          <input
+            type="date"
+            value={runStartedAtTo}
+            onChange={(event) => setRunStartedAtTo(event.target.value)}
+            className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+          />
+        </label>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleApplyRunDateFilter}
+            disabled={runsPageLoading}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            筛选
+          </button>
+          <button
+            type="button"
+            onClick={handleClearRunDateFilter}
+            disabled={runsPageLoading || (!runStartedAtFrom && !runStartedAtTo)}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-secondary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            清空
+          </button>
+        </div>
+      </div>
+      {runs.length === 0
       ? renderEmptyState({
           title: '还没有运行记录',
           description: '对账任务执行后，成功或失败都会在这里沉淀运行记录和异常处理入口。',
@@ -6222,7 +6265,8 @@ export default function ReconWorkspace({
         </div>
       </div>
     </div>
-  );
+      )}
+    </>;
 
   const renderSchemeWizardContent = () => {
     const selectedSourcesForLookup = [...selectedLeftSources, ...selectedRightSources];
@@ -6515,66 +6559,6 @@ export default function ReconWorkspace({
                 对账逻辑只负责“怎么匹配、怎么比较”；这里选择本次要按哪一天的数据发起对账。
               </p>
             </label>
-
-            <div className="rounded-3xl border border-border bg-surface-secondary p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-text-primary">对账日期字段</p>
-                  <p className="mt-1 text-xs leading-5 text-text-secondary">
-                    选择每个基础数据集里代表业务发生日期的字段。运行计划是 T-1 时，系统会先从已采集数据中筛出“该字段等于昨天”的数据，再按整理规则自动补充关联数据。
-                  </p>
-                </div>
-                <span className="rounded-full border border-sky-100 bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700">
-                  {selectedPlanDateInputs.length} 个基础数据集
-                </span>
-              </div>
-              {selectedPlanDateInputs.length > 0 ? (
-                <div className="mt-4 grid gap-3">
-                  {selectedPlanDateInputs.map((input) => {
-                    const options = buildRunPlanDateFieldOptions(input);
-                    return (
-                      <label
-                        key={input.key}
-                        className="grid gap-2 rounded-2xl border border-border-subtle bg-surface px-3 py-3 md:grid-cols-[minmax(160px,0.9fr)_minmax(0,1.4fr)] md:items-center"
-                      >
-                        <span>
-                          <span className="block text-xs font-medium text-text-secondary">
-                            {runPlanInputSideLabel(input.side)} {input.displayName}
-                          </span>
-                          <span className="mt-0.5 block truncate text-[11px] text-text-muted">
-                            {input.alias} / {input.table}
-                          </span>
-                        </span>
-                        <select
-                          value={planDraft.dateFieldByInputKey[input.key] || ''}
-                          onChange={(event) =>
-                            setPlanDraft((prev) => ({
-                              ...prev,
-                              dateFieldByInputKey: {
-                                ...prev.dateFieldByInputKey,
-                                [input.key]: event.target.value,
-                              },
-                            }))
-                          }
-                          className="w-full appearance-none rounded-xl border border-border bg-surface bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23999%22%20stroke-width%3D%222%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%2F%3E%3C%2Fsvg%3E')] bg-[length:16px] bg-[right_10px_center] bg-no-repeat px-3 py-2.5 pr-8 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
-                        >
-                          <option value="">请选择对账日期字段</option>
-                          {options.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-                  当前方案没有可识别的基础输入数据集，请先重新生成数据整理规则。
-                </p>
-              )}
-            </div>
 
             <div className="grid gap-4 md:grid-cols-2">
               <label className="block">
@@ -7220,7 +7204,13 @@ export default function ReconWorkspace({
                 ) : null}
                 <button
                   type="button"
-                  onClick={() => void loadCenterData()}
+                  onClick={() => {
+                    if (activeTab === 'runs') {
+                      void loadRunsPage(0);
+                      return;
+                    }
+                    void loadCenterData();
+                  }}
                   disabled={loadingCenter}
                   className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 text-sm font-medium text-text-primary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >

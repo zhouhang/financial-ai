@@ -50,7 +50,9 @@ function setupFetch() {
   let failedRunFetches = 0;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === '/api/recon/schemes?include_disabled=false&limit=20&offset=0') {
+    const parsedUrl = new URL(url, 'http://localhost');
+    const pathname = parsedUrl.pathname;
+    if (pathname === '/api/recon/schemes') {
       return jsonResponse({
         schemes: [
           {
@@ -58,12 +60,38 @@ function setupFetch() {
             scheme_code: 'scheme-001',
             scheme_name: '资金对账方案',
             is_enabled: true,
+            scheme_meta_json: {
+              left_sources: [
+                {
+                  id: 'left-dataset',
+                  name: '左侧订单',
+                  schema_summary: {
+                    columns: [
+                      { name: 'biz_date', data_type: 'date' },
+                      { name: 'amount', data_type: 'number' },
+                    ],
+                  },
+                },
+              ],
+              right_sources: [
+                {
+                  id: 'right-dataset',
+                  name: '右侧账单',
+                  schema_summary: {
+                    columns: [
+                      { name: 'bill_date', data_type: 'date' },
+                      { name: 'amount', data_type: 'number' },
+                    ],
+                  },
+                },
+              ],
+            },
           },
         ],
         total: 1,
       });
     }
-    if (url === '/api/recon/tasks?limit=20&offset=0') {
+    if (pathname === '/api/recon/tasks' && init?.method !== 'POST') {
       return jsonResponse({
         tasks: [
           {
@@ -81,10 +109,13 @@ function setupFetch() {
         total: 1,
       });
     }
-    if (url === '/api/recon/runs?limit=20&offset=0') {
+    if (pathname === '/api/recon/tasks' && init?.method === 'POST') {
+      return jsonResponse({ success: true });
+    }
+    if (pathname === '/api/recon/runs') {
       return jsonResponse({ runs: runsPayload, total: runsPayload.length });
     }
-    if (url === '/api/recon/runs/run-failed') {
+    if (pathname === '/api/recon/runs/run-failed') {
       failedRunFetches += 1;
       return jsonResponse({
         run: runPayload(
@@ -94,26 +125,40 @@ function setupFetch() {
         ),
       });
     }
-    if (url === '/api/recon/runs/run-success') {
+    if (pathname === '/api/recon/runs/run-success') {
       return jsonResponse({ run: runPayload('run-success', 'success', '成功运行') });
     }
-    if (url === '/api/recon/runs/run-running') {
+    if (pathname === '/api/recon/runs/run-running') {
       return jsonResponse({ run: runPayload('run-running', 'running', '运行中记录') });
     }
-    if (url === '/api/recon/runs/run-failed/exceptions') {
+    if (pathname === '/api/recon/runs/run-failed/exceptions') {
       return jsonResponse({ exceptions: [], total: 0 });
     }
-    if (url === '/api/recon/runs/run-success/exceptions') {
+    if (pathname === '/api/recon/runs/run-success/exceptions') {
       return jsonResponse({ exceptions: [], total: 0 });
     }
-    if (url === '/api/recon/runs/run-running/exceptions') {
+    if (pathname === '/api/recon/runs/run-running/exceptions') {
       return jsonResponse({ exceptions: [], total: 0 });
     }
-    if (url === '/api/recon/runs/rerun' && init?.method === 'POST') {
+    if (pathname === '/api/recon/runs/rerun' && init?.method === 'POST') {
       return jsonResponse({ success: true, run_id: 'run-retry-001' });
     }
-    if (url === '/api/collaboration-channels') {
+    if (pathname === '/api/collaboration-channels') {
       return jsonResponse({ channels: [] });
+    }
+    if (pathname === '/api/owner-candidates/search') {
+      return jsonResponse({
+        candidates: [
+          {
+            display_name: '张三',
+            identifier: 'user-001',
+            organization: '',
+            departments: [],
+            mobile_masked: '',
+            disambiguation_label: '',
+          },
+        ],
+      });
     }
     return jsonResponse({}, 404);
   });
@@ -135,6 +180,35 @@ afterEach(() => {
 });
 
 describe('ReconWorkspace run retry actions', () => {
+  it('filters run records by started date range', async () => {
+    const fetchMock = setupFetch();
+
+    await renderRunsTab();
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-06-01' } });
+    fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-06-22' } });
+    fireEvent.click(screen.getByRole('button', { name: '筛选' }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/recon/runs?limit=20&offset=0&started_at_from=2026-06-01&started_at_to=2026-06-22',
+        expect.any(Object),
+      );
+    });
+  });
+
+  it('does not show date field selection when creating a run plan', async () => {
+    setupFetch();
+
+    render(<ReconWorkspace selectedTask={selectedTask} mode="center" authToken={authToken} />);
+    await screen.findByText('资金对账方案');
+    fireEvent.click(await screen.findByRole('button', { name: '对账任务' }));
+    fireEvent.click(screen.getByRole('button', { name: '新增运行计划' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).queryByText('对账日期字段')).toBeNull();
+    expect(within(dialog).queryByRole('option', { name: '请选择对账日期字段' })).toBeNull();
+  });
+
   it('keeps primary actions out of the run list and shows them in details only', async () => {
     setupFetch();
 

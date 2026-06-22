@@ -100,6 +100,40 @@ def test_delete_execution_run_api_calls_mcp_delete(monkeypatch: pytest.MonkeyPat
     assert captured["auth_token"]
 
 
+def test_list_execution_runs_api_forwards_started_date_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_list(auth_token: str, **kwargs: object) -> dict[str, object]:
+        captured["auth_token"] = auth_token
+        captured.update(kwargs)
+        return {"success": True, "runs": [], "total": 0}
+
+    monkeypatch.setattr(auto_run_api, "execution_run_list", fake_list)
+
+    result = asyncio.run(
+        auto_run_api.list_execution_runs(
+            scheme_code="scheme-001",
+            plan_code="plan-001",
+            started_at_from="2026-06-01",
+            started_at_to="2026-06-22",
+            limit=20,
+            offset=40,
+            authorization=_auth_header(),
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["auth_token"]
+    assert captured["scheme_code"] == "scheme-001"
+    assert captured["plan_code"] == "plan-001"
+    assert captured["started_at_from"] == "2026-06-01"
+    assert captured["started_at_to"] == "2026-06-22"
+    assert captured["limit"] == 20
+    assert captured["offset"] == 40
+
+
 def test_create_execution_scheme_accepts_structure_checked_recon_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

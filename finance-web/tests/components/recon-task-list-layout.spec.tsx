@@ -163,6 +163,8 @@ describe('对账任务列表布局', () => {
     if (!taskList) {
       throw new Error('任务列表容器未渲染');
     }
+    expect(taskList).toHaveClass('min-w-[920px]');
+    expect(taskList).not.toHaveClass('min-w-[1260px]');
 
     expect(within(row).getByText('每日订单对账')).toBeInTheDocument();
     expect(within(taskList).queryByText('对账方案')).not.toBeInTheDocument();

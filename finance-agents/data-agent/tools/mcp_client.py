@@ -973,12 +973,18 @@ async def execution_run_list(
     offset: int = 0,
     scheme_code: str = "",
     plan_code: str = "",
+    started_at_from: str = "",
+    started_at_to: str = "",
 ) -> dict[str, Any]:
     args: dict[str, Any] = {"auth_token": auth_token, "limit": limit, "offset": offset}
     if scheme_code:
         args["scheme_code"] = scheme_code
     if plan_code:
         args["plan_code"] = plan_code
+    if started_at_from:
+        args["started_at_from"] = started_at_from
+    if started_at_to:
+        args["started_at_to"] = started_at_to
     return await call_mcp_tool("execution_run_list", args)
 
 

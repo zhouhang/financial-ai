@@ -56,13 +56,15 @@ logger = logging.getLogger(__name__)
 
 def _load_recon_rule_for_scheme(scheme: dict[str, Any]) -> dict[str, Any]:
     recon_rule_code = _as_text(scheme.get("recon_rule_code"))
-    if not recon_rule_code:
-        return {}
-    from tools.rules import get_rule
+    if recon_rule_code:
+        from tools.rules import get_rule
 
-    rule_row = get_rule(recon_rule_code)
-    rule = rule_row.get("rule") if isinstance(rule_row, dict) else None
-    return rule if isinstance(rule, dict) else {}
+        rule_row = get_rule(recon_rule_code)
+        rule = rule_row.get("rule") if isinstance(rule_row, dict) else None
+        if isinstance(rule, dict):
+            return rule
+    scheme_meta_json = _safe_dict(scheme.get("scheme_meta_json"))
+    return _safe_dict(scheme_meta_json.get("recon_rule_json"))
 
 
 def _plan_meta_with_inferred_rollup(
@@ -82,7 +84,10 @@ def _plan_meta_with_inferred_rollup(
         input_bindings_json=input_bindings_json,
     )
     if is_enabled and schedule_type == "daily" and not has_enabled_rollup(meta):
-        return meta, warnings[0] if warnings else "日报 rollup 配置缺失"
+        meta["rollup"] = {
+            "enabled": False,
+            "warning": warnings[0] if warnings else "日报 rollup 配置缺失",
+        }
     return meta, ""
 
 
@@ -356,6 +361,8 @@ def create_tools() -> list[Tool]:
                     "scheme_id": {"type": "string"},
                     "plan_code": {"type": "string"},
                     "run_plan_id": {"type": "string"},
+                    "started_at_from": {"type": "string"},
+                    "started_at_to": {"type": "string"},
                     "limit": {"type": "integer"},
                     "offset": {"type": "integer"},
                 },
@@ -2775,6 +2782,8 @@ def _run_list(arguments: dict[str, Any]) -> dict[str, Any]:
         company_id=company_id,
         scheme_code=scheme_code,
         plan_code=plan_code,
+        started_at_from=_as_text(arguments.get("started_at_from")),
+        started_at_to=_as_text(arguments.get("started_at_to")),
         limit=_as_int(arguments.get("limit"), 100, minimum=1, maximum=500),
         offset=_as_int(arguments.get("offset"), 0, minimum=0),
     )
@@ -2782,6 +2791,8 @@ def _run_list(arguments: dict[str, Any]) -> dict[str, Any]:
         company_id=company_id,
         scheme_code=scheme_code,
         plan_code=plan_code,
+        started_at_from=_as_text(arguments.get("started_at_from")),
+        started_at_to=_as_text(arguments.get("started_at_to")),
     )
     return {"success": True, "count": len(items), "total": total, "runs": items}
 

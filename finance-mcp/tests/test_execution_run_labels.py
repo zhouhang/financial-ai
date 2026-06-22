@@ -105,6 +105,38 @@ def test_list_execution_runs_returns_plan_and_scheme_names(monkeypatch) -> None:
     assert runs[0]["scheme_name"] == "店铺资金对账方案"
 
 
+def test_list_execution_runs_filters_by_started_at_range(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+
+    auth_db.list_execution_runs(
+        company_id="company-001",
+        started_at_from="2026-06-01",
+        started_at_to="2026-06-22",
+    )
+
+    sql = "\n".join(cursor.sql)
+    assert "runs.started_at >= %s" in sql
+    assert "runs.started_at < (%s::date + INTERVAL '1 day')" in sql
+    assert cursor.params[0] == ("company-001", "2026-06-01", "2026-06-22", 100, 0)
+
+
+def test_count_execution_runs_filters_by_started_at_range(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+
+    auth_db.count_execution_runs(
+        company_id="company-001",
+        started_at_from="2026-06-01",
+        started_at_to="2026-06-22",
+    )
+
+    sql = "\n".join(cursor.sql)
+    assert "started_at >= %s" in sql
+    assert "started_at < (%s::date + INTERVAL '1 day')" in sql
+    assert cursor.params[0] == ("company-001", "2026-06-01", "2026-06-22")
+
+
 def test_run_exceptions_returns_current_run_scheme_for_display(monkeypatch) -> None:
     from tools import execution_runs
 
