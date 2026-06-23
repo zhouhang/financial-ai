@@ -43,6 +43,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from config import (
     HOST,
     PORT,
+    BROWSER_AGENT_WS_MAX_SIZE,
     MAX_FILE_SIZE,
     LANGGRAPH_CHECKPOINT_DATABASE_URL,
     LANGGRAPH_CHECKPOINT_SCHEMA,
@@ -1662,7 +1663,13 @@ async def delete_conversation(
 
 def main():
     import uvicorn
-    uvicorn.run("server:app", host=HOST, port=int(PORT), reload=False)
+    uvicorn.run(
+        "server:app",
+        host=HOST,
+        port=int(PORT),
+        reload=False,
+        ws_max_size=int(BROWSER_AGENT_WS_MAX_SIZE),
+    )
 
 
 if __name__ == "__main__":

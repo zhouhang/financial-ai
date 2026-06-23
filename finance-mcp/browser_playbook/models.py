@@ -24,6 +24,7 @@ ActionType = Literal[
     "download",
     "download_history_file",
     "download_qianniu_export_report",
+    "download_bill_summary_detail_files",
     "parse_table",
     "paginate_capture_json",
     "assert",
@@ -100,6 +101,30 @@ class PlaybookStep(BaseModel):
     history_refresh_interval_ms: int | None = None
     history_completed_status_text: str | None = None
     history_download_selector: str | None = None
+    bill_type_label: str | None = None
+    bill_type_selector: str | None = None
+    bill_type_selectors: list[str] | None = None
+    bill_type_option_selector: str | None = None
+    bill_type_option_selectors: list[str] | None = None
+    bill_type_open_timeout_ms: int | None = None
+    bill_type_option_timeout_ms: int | None = None
+    bill_type_option_wait_ms: int | None = None
+    bill_type_select_wait_ms: int | None = None
+    bill_type_verify_timeout_ms: int | None = None
+    search_selector: str | None = None
+    search_wait_ms: int | None = None
+    summary_row_selector: str | None = None
+    summary_item_selector: str | None = None
+    summary_detail_button_selector: str | None = None
+    max_detail_files: int | None = None
+    detail_click_timeout_ms: int | None = None
+    detail_click_wait_ms: int | None = None
+    after_detail_click_selector: str | None = None
+    after_detail_click_selectors: list[str] | None = None
+    after_detail_click_timeout_ms: int | None = None
+    detail_success_close_selector: str | None = None
+    detail_success_close_selectors: list[str] | None = None
+    detail_success_close_timeout_ms: int | None = None
     duration_ms: int | None = None
     refresh_interval_ms: int | None = None
     allowed_labels: list[str] | None = None
@@ -203,6 +228,20 @@ class PlaybookStep(BaseModel):
                 raise ValueError("download_qianniu_export_report requires requested_after_from")
             if not str(self.download_button_text or "").strip():
                 raise ValueError("download_qianniu_export_report requires download_button_text")
+        if self.action == "download_bill_summary_detail_files":
+            if not str(self.bill_type_label or "").strip():
+                raise ValueError("download_bill_summary_detail_files requires bill_type_label")
+            if not str(self.summary_row_selector or "").strip():
+                raise ValueError("download_bill_summary_detail_files requires summary_row_selector")
+            if not str(self.summary_detail_button_selector or "").strip():
+                raise ValueError("download_bill_summary_detail_files requires summary_detail_button_selector")
+            if not (
+                str(self.history_row_selector or "").strip()
+                or self.history_row_selectors
+            ):
+                raise ValueError("download_bill_summary_detail_files requires history_row_selector")
+            if not str(self.history_download_selector or "").strip():
+                raise ValueError("download_bill_summary_detail_files requires history_download_selector")
         if self.action == "extract_summary" and not self.mapping:
             raise ValueError("extract_summary requires mapping")
         if self.action == "parse_table":

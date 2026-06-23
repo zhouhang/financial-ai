@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -825,6 +826,19 @@ def _execute_action(
             capture_files=capture_files,
             download_dir=download_dir,
             timeout_ms=timeout_ms,
+            storage_context=storage_context,
+            overlays=overlays,
+        )
+    if name == "download_bill_summary_detail_files":
+        return _download_bill_summary_detail_files(
+            page,
+            action,
+            params=params,
+            extracted=extracted,
+            capture_files=capture_files,
+            download_dir=download_dir,
+            timeout_ms=timeout_ms,
+            run_config=run_config,
             storage_context=storage_context,
             overlays=overlays,
         )
@@ -2639,6 +2653,29 @@ def _click_first_available_selector(
 ) -> bool:
     last_error: Exception | None = None
     for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            count = locator.count()
+        except Exception:
+            locator = None
+            count = None
+        if count is not None:
+            if count <= 0:
+                continue
+            attempted_visible = False
+            for index in range(min(count, 20)):
+                try:
+                    candidate = locator.nth(index)
+                    if not candidate.is_visible(timeout=250):
+                        continue
+                    attempted_visible = True
+                    candidate.click(timeout=timeout_ms, force=force)
+                    return True
+                except Exception as exc:
+                    last_error = exc
+            if attempted_visible:
+                continue
+            continue
         has_matches = _selector_has_matches(page, selector)
         if has_matches is False:
             continue
@@ -3193,6 +3230,896 @@ def _download_history_file(
         capture_files=capture_files,
         storage_context=storage_context,
     )
+
+
+def _download_bill_summary_detail_files(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    params: dict[str, Any],
+    extracted: dict[str, Any],
+    capture_files: list[dict[str, Any]],
+    download_dir: Path,
+    timeout_ms: int,
+    run_config: PlaywrightRunConfig | None = None,
+    storage_context: dict[str, str] | None = None,
+    overlays: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    bill_type_label = _render_template(
+        str(action.get("bill_type_label") or ""),
+        params=params,
+        extracted=extracted,
+    ).strip()
+    summary_row_selector = str(action.get("summary_row_selector") or "").strip()
+    detail_button_selector = str(action.get("summary_detail_button_selector") or "").strip()
+    history_row_selectors = _configured_selectors(
+        action,
+        "history_row_selectors",
+        "history_row_selector",
+    )
+    history_download_selector = str(
+        action.get("history_download_selector") or "button:has-text('下载')"
+    ).strip()
+    if (
+        not bill_type_label
+        or not summary_row_selector
+        or not detail_button_selector
+        or not history_row_selectors
+        or not history_download_selector
+    ):
+        raise BrowserActionError(
+            "PAGE_CHANGED",
+            "download_bill_summary_detail_files requires bill_type_label, summary rows, "
+            "detail button, history rows, and history download selector",
+        )
+
+    if not _select_bill_summary_type(
+        page,
+        action,
+        bill_type_label=bill_type_label,
+        timeout_ms=timeout_ms,
+    ):
+        logger.info(
+            "bill summary type is unavailable for current shop; skipping: type=%s",
+            bill_type_label,
+        )
+        return {"rows": []}
+    search_selector = str(action.get("search_selector") or "").strip()
+    if search_selector:
+        _dismiss_configured_overlays(page, overlays)
+        _click_like_human(
+            page,
+            search_selector,
+            timeout_ms=timeout_ms,
+            run_config=run_config,
+            overlays=overlays,
+        )
+        _wait_for_timeout(page, int(action.get("search_wait_ms") or 3000))
+
+    try:
+        page.wait_for_selector(summary_row_selector, timeout=min(timeout_ms, 30000))
+    except Exception:
+        logger.info(
+            "bill summary rows not visible for type=%s; treating as empty result",
+            bill_type_label,
+        )
+        return {"rows": []}
+
+    requests = _request_bill_summary_detail_exports(
+        page,
+        action,
+        bill_type_label=bill_type_label,
+        summary_row_selector=summary_row_selector,
+        detail_button_selector=detail_button_selector,
+        timeout_ms=timeout_ms,
+        run_config=run_config,
+        overlays=overlays,
+    )
+    if not requests:
+        logger.info("bill summary type has no downloadable detail rows: type=%s", bill_type_label)
+        return {"rows": []}
+
+    downloaded = _download_bill_summary_history_exports(
+        page,
+        action,
+        requests=requests,
+        target_date=str(params.get("biz_date") or ""),
+        capture_files=capture_files,
+        download_dir=download_dir,
+        timeout_ms=timeout_ms,
+        storage_context=storage_context,
+        overlays=overlays,
+    )
+    _close_bill_summary_history_if_configured(
+        page,
+        action,
+        timeout_ms=timeout_ms,
+        overlays=overlays,
+    )
+
+    rows: list[dict[str, Any]] = []
+    fmt = str(action.get("format") or "csv").lower()
+    skip_rows = int(action.get("skip_rows") or 0)
+    archive = str(action.get("archive") or "").strip().lower()
+    drop_row_prefix = str(action.get("drop_row_prefix") or "")
+    for entry in downloaded:
+        parsed_rows, encoding = _parse_bill_summary_detail_download(
+            entry,
+            fmt=fmt,
+            skip_rows=skip_rows,
+            archive=archive,
+            drop_row_prefix=drop_row_prefix,
+            biz_date=str(params.get("biz_date") or ""),
+        )
+        rows.extend(parsed_rows)
+        capture_index = entry.get("capture_index")
+        if isinstance(capture_index, int) and 0 <= capture_index < len(capture_files):
+            capture_files[capture_index]["encoding"] = encoding
+            capture_files[capture_index]["row_count"] = len(parsed_rows)
+
+    return {"rows": rows}
+
+
+def _close_bill_summary_history_if_configured(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    timeout_ms: int,
+    overlays: list[dict[str, Any]] | None,
+) -> None:
+    history_close_selectors = _configured_selectors(
+        action,
+        "history_close_selectors",
+        "history_close_selector",
+    )
+    if not history_close_selectors:
+        return
+    try:
+        _dismiss_configured_overlays(page, overlays)
+        _click_first_available_selector(
+            page,
+            history_close_selectors,
+            timeout_ms=min(timeout_ms, int(action.get("history_refresh_close_timeout_ms") or 3000)),
+            force=True,
+        )
+        _wait_for_timeout(page, 300)
+    except Exception as exc:
+        logger.info("bill detail history close after downloads skipped: %s", exc)
+
+
+def _select_bill_summary_type(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    bill_type_label: str,
+    timeout_ms: int,
+) -> bool:
+    bill_type_selectors = _configured_selectors(action, "bill_type_selectors", "bill_type_selector")
+    if not bill_type_selectors:
+        return True
+    _click_first_available_selector(
+        page,
+        bill_type_selectors,
+        timeout_ms=min(timeout_ms, int(action.get("bill_type_open_timeout_ms") or 10000)),
+        force=True,
+    )
+    _wait_for_timeout(page, int(action.get("bill_type_option_wait_ms") or 500))
+    option_selectors = _bill_type_option_selectors(action, bill_type_label)
+    if not _click_first_available_selector(
+        page,
+        option_selectors,
+        timeout_ms=min(timeout_ms, int(action.get("bill_type_option_timeout_ms") or 10000)),
+        force=True,
+    ):
+        return False
+    _wait_for_timeout(page, int(action.get("bill_type_select_wait_ms") or 800))
+    verify_timeout_ms = int(action.get("bill_type_verify_timeout_ms") or 5000)
+    if verify_timeout_ms > 0 and not _wait_for_predicate(
+        page,
+        lambda: _bill_summary_type_is_selected(page, bill_type_selectors, bill_type_label),
+        verify_timeout_ms,
+    ):
+        raise BrowserActionError(
+            "PAGE_CHANGED",
+            f"bill type selection was not applied: {bill_type_label}",
+        )
+    return True
+
+
+def _bill_summary_type_is_selected(
+    page: Any,
+    bill_type_selectors: list[str],
+    bill_type_label: str,
+) -> bool:
+    target = str(bill_type_label or "").strip()
+    if not target:
+        return True
+    for selector in bill_type_selectors:
+        try:
+            locator = page.locator(selector)
+            count = locator.count()
+        except Exception:
+            continue
+        for index in range(count):
+            try:
+                text = locator.nth(index).inner_text(timeout=500)
+            except Exception:
+                continue
+            if target in " ".join(str(text or "").split()):
+                return True
+    return False
+
+
+def _bill_type_option_selectors(action: dict[str, Any], bill_type_label: str) -> list[str]:
+    selectors = _configured_selectors(
+        action,
+        "bill_type_option_selectors",
+        "bill_type_option_selector",
+    )
+    text_arg = _playwright_text_arg(bill_type_label)
+    scoped_selectors = [
+        f".next-overlay-wrapper.opened [role='option']:has-text({text_arg})",
+        f".next-overlay-wrapper.opened .next-menu-item:has-text({text_arg})",
+        f".next-overlay-wrapper.opened .next-select-menu-item:has-text({text_arg})",
+        f".next-overlay-wrapper.opened li:has-text({text_arg})",
+        f".next-overlay-wrapper [role='listbox'] [role='option']:has-text({text_arg})",
+        f".next-overlay-wrapper [role='menu'] [role='menuitem']:has-text({text_arg})",
+        f".next-select-dropdown [role='option']:has-text({text_arg})",
+        f".next-select-dropdown .next-menu-item:has-text({text_arg})",
+        f".next-select-dropdown .next-select-menu-item:has-text({text_arg})",
+        f".next-select-dropdown li:has-text({text_arg})",
+        f"[role='listbox'] [role='option']:has-text({text_arg})",
+    ]
+    selectors = scoped_selectors + selectors
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        if selector and selector not in seen:
+            deduped.append(selector)
+            seen.add(selector)
+    return deduped
+
+
+def _request_bill_summary_detail_exports(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    bill_type_label: str,
+    summary_row_selector: str,
+    detail_button_selector: str,
+    timeout_ms: int,
+    run_config: PlaywrightRunConfig | None,
+    overlays: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    max_detail_files = max(1, int(action.get("max_detail_files") or 100))
+    rows = page.locator(summary_row_selector)
+    candidates: list[dict[str, Any]] = []
+    for index, compact_text in _locator_text_rows(rows, timeout_ms=timeout_ms):
+        if len(candidates) >= max_detail_files:
+            break
+        row = rows.nth(index)
+        button = row.locator(detail_button_selector).first
+        try:
+            if button.count() <= 0:
+                continue
+        except Exception:
+            continue
+        try:
+            if not button.is_visible(timeout=500):
+                continue
+        except Exception:
+            continue
+        try:
+            if button.is_disabled(timeout=500):
+                continue
+        except Exception:
+            pass
+        candidates.append(
+            {
+                "row_index": index,
+                "row_text": compact_text,
+                "summary_item": _bill_summary_item_text(row, action, fallback_text=compact_text),
+            }
+        )
+
+    requests: list[dict[str, Any]] = []
+    after_click_selectors = _configured_selectors(
+        action,
+        "after_detail_click_selectors",
+        "after_detail_click_selector",
+    )
+    click_wait_ms = int(action.get("detail_click_wait_ms") or 1000)
+    success_close_selectors = _configured_selectors(
+        action,
+        "detail_success_close_selectors",
+        "detail_success_close_selector",
+    )
+    success_close_timeout_ms = int(action.get("detail_success_close_timeout_ms") or 3000)
+    success_wait_selectors = _configured_selectors(
+        action,
+        "detail_success_wait_selectors",
+        "detail_success_wait_selector",
+    )
+    for candidate_position, candidate in enumerate(candidates):
+        row_index = int(candidate["row_index"])
+        row = rows.nth(row_index)
+        requested_after = datetime.now()
+        _dismiss_configured_overlays(page, overlays)
+        _dismiss_overlays_and_retry_once(
+            page,
+            overlays,
+            lambda: row.locator(detail_button_selector).first.click(
+                timeout=min(timeout_ms, int(action.get("detail_click_timeout_ms") or 30000))
+            ),
+        )
+        if after_click_selectors:
+            try:
+                _click_first_available_selector(
+                    page,
+                    after_click_selectors,
+                    timeout_ms=min(timeout_ms, int(action.get("after_detail_click_timeout_ms") or 3000)),
+                    force=True,
+                )
+            except Exception as exc:
+                logger.info("bill detail after-click selector skipped: %s", exc)
+        _wait_for_timeout(page, click_wait_ms)
+        if success_wait_selectors:
+            for selector in success_wait_selectors:
+                try:
+                    page.wait_for_selector(selector, timeout=success_close_timeout_ms)
+                    break
+                except Exception:
+                    continue
+        if success_close_selectors:
+            try:
+                _click_first_available_selector(
+                    page,
+                    success_close_selectors,
+                    timeout_ms=success_close_timeout_ms,
+                    force=True,
+                )
+                _wait_for_timeout(page, int(action.get("detail_success_after_close_wait_ms") or 500))
+            except Exception as exc:
+                logger.info("bill detail success dialog close skipped: %s", exc)
+        requests.append(
+            {
+                "bill_type_label": bill_type_label,
+                "summary_item": str(candidate.get("summary_item") or "").strip(),
+                "requested_after": requested_after,
+                "row_text": str(candidate.get("row_text") or ""),
+            }
+        )
+        logger.info(
+            "bill summary detail export requested: type=%s item=%s row=%s",
+            bill_type_label,
+            candidate.get("summary_item") or "",
+            row_index,
+        )
+    return requests
+
+
+def _bill_summary_item_text(row: Any, action: dict[str, Any], *, fallback_text: str) -> str:
+    item_selector = str(action.get("summary_item_selector") or "").strip()
+    if item_selector:
+        try:
+            text = row.locator(item_selector).first.inner_text(timeout=1000)
+            if str(text or "").strip():
+                return _compact_bill_summary_item_text(str(text))
+        except Exception as exc:
+            logger.info("bill summary item selector skipped: selector=%s error=%s", item_selector, exc)
+    text = str(fallback_text or "")
+    for marker in ("下载明细", "下载", "明细"):
+        text = text.replace(marker, " ")
+    lines = [line.strip() for line in re.split(r"[\n\r]+", text) if line.strip()]
+    if not lines:
+        lines = [part.strip() for part in re.split(r"\s{2,}", text) if part.strip()]
+    if lines:
+        return _compact_bill_summary_item_text(lines[0])
+    return _compact_bill_summary_item_text(text)
+
+
+def _compact_bill_summary_item_text(value: str) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    currency_match = re.search(r"\s+(?:CNY|USD|HKD|EUR|GBP|JPY|RMB|¥|￥)\b", text, flags=re.IGNORECASE)
+    if currency_match:
+        text = text[:currency_match.start()].strip()
+    return text[:120]
+
+
+def _download_bill_summary_history_exports(
+    page: Any,
+    action: dict[str, Any],
+    *,
+    requests: list[dict[str, Any]],
+    target_date: str,
+    capture_files: list[dict[str, Any]],
+    download_dir: Path,
+    timeout_ms: int,
+    storage_context: dict[str, str] | None,
+    overlays: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    history_row_selectors = _configured_selectors(
+        action,
+        "history_row_selectors",
+        "history_row_selector",
+    )
+    history_open_selectors = _configured_selectors(
+        action,
+        "history_open_selectors",
+        "history_open_selector",
+    )
+    history_close_selectors = _configured_selectors(
+        action,
+        "history_close_selectors",
+        "history_close_selector",
+    )
+    status_text = str(action.get("history_completed_status_text") or "已完成").strip()
+    download_selector = str(action.get("history_download_selector") or "button:has-text('下载')").strip()
+    refresh_interval_ms = max(1000, int(action.get("history_refresh_interval_ms") or 5000))
+    history_open_timeout_ms = int(action.get("history_open_timeout_ms") or 30000)
+    history_refresh_close_timeout_ms = int(
+        action.get("history_refresh_close_timeout_ms")
+        or min(max(1000, history_open_timeout_ms), 3000)
+    )
+    stale_refresh_polls = max(1, int(action.get("history_stale_refresh_polls") or 5))
+    if not history_row_selectors or not download_selector:
+        raise BrowserActionError("PAGE_CHANGED", "bill detail history selectors are required")
+
+    class _CandidateClickBlocked(Exception):
+        def __init__(self, error: Exception | None):
+            super().__init__(str(error or ""))
+            self.error = error
+
+    def _history_has_rows() -> bool:
+        for selector in history_row_selectors:
+            try:
+                if _locator_text_rows(page.locator(selector), timeout_ms=history_open_timeout_ms):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _wait_for_history_rows() -> bool:
+        return _wait_for_predicate(
+            page,
+            _history_has_rows,
+            history_open_timeout_ms,
+        )
+
+    def _assert_bill_summary_url(stage: str) -> None:
+        try:
+            url = str(page.url or "")
+        except Exception:
+            return
+        if "myseller.taobao.com" in url and "whale-accountant/bill/summary" not in url:
+            raise BrowserActionError(
+                "PAGE_CHANGED",
+                f"bill detail history {stage} navigated away from bill summary: {url}",
+            )
+
+    def _open_history(*, force: bool = False) -> None:
+        if not force and _history_has_rows():
+            return
+        if not history_open_selectors:
+            return
+        _dismiss_configured_overlays(page, overlays)
+        _dismiss_overlays_and_retry_once(
+            page,
+            overlays,
+            lambda: _click_first_available_selector(
+                page,
+                history_open_selectors,
+                timeout_ms=history_open_timeout_ms,
+                force=True,
+            ),
+        )
+        if not _wait_for_history_rows():
+            logger.info(
+                "bill detail history opened but rows not visible yet: selectors=%s",
+                history_row_selectors,
+            )
+        _assert_bill_summary_url("open")
+
+    def _refresh_history(reason: str) -> None:
+        closed = False
+        if history_open_selectors and history_close_selectors:
+            try:
+                _dismiss_configured_overlays(page, overlays)
+                closed = bool(
+                    _dismiss_overlays_and_retry_once(
+                        page,
+                        overlays,
+                        lambda: _click_first_available_selector(
+                            page,
+                            history_close_selectors,
+                            timeout_ms=history_refresh_close_timeout_ms,
+                            force=True,
+                        ),
+                    )
+                )
+                if closed:
+                    _wait_for_timeout(page, min(1000, refresh_interval_ms))
+                _assert_bill_summary_url(f"refresh close ({reason})")
+            except BrowserActionError:
+                raise
+            except Exception as exc:
+                logger.info("bill detail history close before refresh skipped: %s", exc)
+        try:
+            _open_history(force=closed)
+            _assert_bill_summary_url(f"refresh open ({reason})")
+        except BrowserActionError:
+            raise
+        except Exception as exc:
+            logger.info("bill detail history reopen skipped: %s", exc)
+
+    def _ensure_history_available() -> None:
+        try:
+            _open_history()
+        except Exception as exc:
+            logger.info("bill detail history ensure skipped: %s", exc)
+
+    try:
+        _open_history()
+    except Exception as exc:
+        logger.info("bill detail history open skipped; checking current page: %s", exc)
+
+    pending = [dict(request) for request in requests]
+    downloaded: list[dict[str, Any]] = []
+    used_row_keys: set[str] = set()
+    earliest_request = min(
+        (
+            request["requested_after"]
+            for request in pending
+            if isinstance(request.get("requested_after"), datetime)
+        ),
+        default=None,
+    )
+    tolerance_seconds = max(0, int(action.get("request_time_tolerance_seconds") or 60))
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    stale_history_polls = 0
+    while pending and time.monotonic() <= deadline:
+        candidates = _bill_summary_history_candidates(
+            page,
+            history_row_selectors=history_row_selectors,
+            download_selector=download_selector,
+            status_text=status_text,
+            earliest_request=earliest_request,
+            tolerance_seconds=tolerance_seconds,
+            target_date=target_date,
+            used_row_keys=used_row_keys,
+            timeout_ms=timeout_ms,
+        )
+        handled_candidate = False
+        while pending and candidates:
+            request_index, candidate_index = _match_bill_summary_history_candidate(
+                pending,
+                candidates,
+            )
+            if request_index < 0 or candidate_index < 0:
+                break
+            request = pending.pop(request_index)
+            candidate = candidates.pop(candidate_index)
+            row_key = str(candidate.get("row_key") or "")
+            row = candidate["row"]
+            click_timeout_ms = min(
+                timeout_ms,
+                int(action.get("history_download_click_timeout_ms") or 8000),
+            )
+            target = row.locator(download_selector).first
+            last_exc: Exception | None = None
+            try:
+                with page.expect_download(timeout=int(action.get("download_timeout_ms") or 600000)) as info:
+                    clicked = False
+                    for _ in range(6):
+                        _dismiss_configured_overlays(page, overlays)
+                        try:
+                            target.click(timeout=click_timeout_ms)
+                            clicked = True
+                            break
+                        except Exception as exc:
+                            last_exc = exc
+                            _wait_for_timeout(page, 500)
+                    if not clicked:
+                        raise _CandidateClickBlocked(last_exc)
+            except _CandidateClickBlocked as exc:
+                handled_candidate = True
+                logger.info(
+                    "bill detail history candidate skipped after blocked click: item=%s row=%s error=%s",
+                    request.get("summary_item") or "",
+                    str(candidate.get("row_text") or ""),
+                    exc.error,
+                )
+                used_row_keys.add(row_key)
+                pending.insert(request_index, request)
+                continue
+            before_count = len(capture_files)
+            saved = _save_download(
+                info.value,
+                download_dir=download_dir,
+                capture_files=capture_files,
+                storage_context=storage_context,
+            )
+            used_row_keys.add(row_key)
+            downloaded.append(
+                {
+                    "path": saved["last_download"],
+                    "bill_type_label": str(request.get("bill_type_label") or ""),
+                    "summary_item": str(request.get("summary_item") or ""),
+                    "history_row_text": str(candidate.get("row_text") or ""),
+                    "capture_index": before_count if len(capture_files) > before_count else None,
+                }
+            )
+            logger.info(
+                "bill summary detail export downloaded: type=%s item=%s path=%s",
+                request.get("bill_type_label") or "",
+                request.get("summary_item") or "",
+                saved["last_download"],
+            )
+            handled_candidate = True
+            stale_history_polls = 0
+
+        if pending:
+            if not handled_candidate and _history_has_rows():
+                stale_history_polls += 1
+            elif handled_candidate:
+                stale_history_polls = 0
+            else:
+                stale_history_polls = 0
+            remaining_ms = int(max(0, (deadline - time.monotonic()) * 1000))
+            if remaining_ms <= 0:
+                break
+            wait_ms = min(refresh_interval_ms, remaining_ms)
+            logger.info(
+                "bill summary detail exports not ready; waiting: pending=%s wait_ms=%s",
+                len(pending),
+                wait_ms,
+            )
+            _wait_for_timeout(page, wait_ms)
+            if time.monotonic() <= deadline:
+                if stale_history_polls >= stale_refresh_polls:
+                    logger.info(
+                        "bill summary detail history rows look stale; refreshing drawer: "
+                        "pending=%s stale_polls=%s",
+                        len(pending),
+                        stale_history_polls,
+                    )
+                    _refresh_history("stale rows")
+                    stale_history_polls = 0
+                else:
+                    _ensure_history_available()
+
+    if pending:
+        pending_items = [
+            f"{request.get('bill_type_label') or ''}/{request.get('summary_item') or ''}"
+            for request in pending
+        ]
+        raise BrowserActionError(
+            "EXPORT_REPORT_NOT_READY",
+            f"bill summary detail exports not completed: {pending_items}",
+        )
+    return downloaded
+
+
+def _bill_summary_history_candidates(
+    page: Any,
+    *,
+    history_row_selectors: list[str],
+    download_selector: str,
+    status_text: str,
+    earliest_request: datetime | None,
+    tolerance_seconds: int,
+    target_date: str,
+    used_row_keys: set[str],
+    timeout_ms: int,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    earliest_allowed = (
+        earliest_request - timedelta(seconds=tolerance_seconds)
+        if earliest_request is not None
+        else None
+    )
+    for selector in history_row_selectors:
+        rows = page.locator(selector)
+        for index, compact_text in _locator_text_rows(rows, timeout_ms=timeout_ms):
+            row_key = f"{selector}:{index}:{compact_text}"
+            if row_key in used_row_keys:
+                continue
+            if not _bill_summary_history_row_is_candidate(
+                compact_text,
+                status_text=status_text,
+                earliest_allowed=earliest_allowed,
+                target_date=target_date,
+            ):
+                continue
+            row_times = _extract_history_row_datetimes(compact_text)
+            row = rows.nth(index)
+            button = row.locator(download_selector).first
+            try:
+                if button.count() <= 0:
+                    continue
+            except Exception:
+                continue
+            try:
+                if not button.is_visible(timeout=500):
+                    continue
+            except Exception:
+                continue
+            try:
+                if button.is_disabled(timeout=500):
+                    continue
+            except Exception:
+                pass
+            candidates.append(
+                {
+                    "row": row,
+                    "row_key": row_key,
+                    "row_text": compact_text,
+                    "row_times": row_times,
+                }
+            )
+    return candidates
+
+
+def _bill_summary_history_row_is_candidate(
+    row_text: str,
+    *,
+    status_text: str,
+    earliest_allowed: datetime | None,
+    target_date: str,
+) -> bool:
+    compact_text = " ".join(str(row_text or "").split())
+    if status_text and status_text not in compact_text:
+        return False
+    row_times = _extract_history_row_datetimes(compact_text)
+    if earliest_allowed is not None and row_times and max(row_times) < earliest_allowed:
+        return False
+    if target_date:
+        return _history_row_matches_target_date(compact_text, target_date)
+    return True
+
+
+def _match_bill_summary_history_candidate(
+    requests: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> tuple[int, int]:
+    for request_index, request in enumerate(requests):
+        summary_item = str(request.get("summary_item") or "").strip()
+        bill_type_label = str(request.get("bill_type_label") or "").strip()
+        for candidate_index, candidate in enumerate(candidates):
+            text = str(candidate.get("row_text") or "")
+            if summary_item and summary_item in text:
+                return request_index, candidate_index
+            if bill_type_label and bill_type_label in text:
+                return request_index, candidate_index
+    return -1, -1
+
+
+def _extract_history_row_datetimes(row_text: str) -> list[datetime]:
+    compact_text = " ".join(str(row_text or "").split())
+    matches = re.findall(
+        r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?\s+"
+        r"(\d{1,2}):(\d{2})(?::(\d{2}))?",
+        compact_text,
+    )
+    parsed: list[datetime] = []
+    for year, month, day, hour, minute, second in matches:
+        try:
+            parsed.append(
+                datetime(
+                    int(year),
+                    int(month),
+                    int(day),
+                    int(hour),
+                    int(minute),
+                    int(second or "0"),
+                )
+            )
+        except ValueError:
+            continue
+    return parsed
+
+
+def _parse_bill_summary_detail_downloads(
+    downloads: list[dict[str, Any]],
+    *,
+    fmt: str = "csv",
+    skip_rows: int = 0,
+    archive: str = "",
+    drop_row_prefix: str = "",
+    biz_date: str = "",
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for download in downloads:
+        parsed_rows, _encoding = _parse_bill_summary_detail_download(
+            download,
+            fmt=fmt,
+            skip_rows=skip_rows,
+            archive=archive,
+            drop_row_prefix=drop_row_prefix,
+            biz_date=biz_date,
+        )
+        rows.extend(parsed_rows)
+    return rows
+
+
+def _parse_bill_summary_detail_download(
+    download: dict[str, Any],
+    *,
+    fmt: str,
+    skip_rows: int,
+    archive: str,
+    drop_row_prefix: str,
+    biz_date: str,
+) -> tuple[list[dict[str, Any]], str]:
+    original_path = Path(str(download.get("path") or ""))
+    path = original_path
+    if archive == "zip" or path.suffix.lower() == ".zip":
+        path = _extract_single_table_from_zip(path)
+    effective_fmt = _table_format_for_path(path, fmt)
+    rows, encoding = _parse_downloaded_table_with_metadata(
+        path,
+        fmt=effective_fmt,
+        skip_rows=skip_rows,
+    )
+    if drop_row_prefix:
+        rows = [
+            row for row in rows
+            if not str(next(iter(row.values()), "")).startswith(drop_row_prefix)
+        ]
+
+    bill_type_label = str(download.get("bill_type_label") or "").strip()
+    summary_item = str(download.get("summary_item") or "").strip()
+    parsed_rows: list[dict[str, Any]] = []
+    for row_index, row in enumerate(rows, start=1):
+        normalized_row = {str(key): value for key, value in row.items()}
+        metadata = {
+            "源账单类型": bill_type_label,
+            "区间汇总项": summary_item,
+            "源文件名": original_path.name,
+            "源行号": str(row_index),
+        }
+        if biz_date:
+            metadata["biz_date"] = biz_date
+        metadata["采集明细键"] = _bill_summary_detail_key(
+            row=normalized_row,
+            bill_type_label=bill_type_label,
+            summary_item=summary_item,
+            source_file_name=original_path.name,
+            source_row_index=row_index,
+        )
+        normalized_row.update(metadata)
+        parsed_rows.append(normalized_row)
+    return parsed_rows, encoding
+
+
+def _table_format_for_path(path: Path, fmt: str) -> str:
+    normalized = str(fmt or "").strip().lower()
+    if normalized in {"csv", "xlsx"}:
+        return normalized
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        return "xlsx"
+    return "csv"
+
+
+def _bill_summary_detail_key(
+    *,
+    row: dict[str, Any],
+    bill_type_label: str,
+    summary_item: str,
+    source_file_name: str,
+    source_row_index: int,
+) -> str:
+    payload = {
+        "bill_type_label": bill_type_label,
+        "summary_item": summary_item,
+        "source_file_name": source_file_name,
+        "source_row_index": source_row_index,
+        "row": row,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 class BrowserActionError(Exception):

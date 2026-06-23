@@ -22,6 +22,7 @@ VALID_ACTIONS = {
     "download",
     "download_history_file",
     "download_qianniu_export_report",
+    "download_bill_summary_detail_files",
     "parse_table",
     "paginate_capture_json",
     "assert",

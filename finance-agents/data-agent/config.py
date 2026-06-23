@@ -41,6 +41,9 @@ ZHIPU_TIMEOUT_SECONDS: float = float(os.getenv("ZHIPU_TIMEOUT_SECONDS", "30"))
 # ── 服务器 ────────────────────────────────────────────────────────────────────
 HOST: str = os.getenv("HOST", "0.0.0.0")
 PORT: int = int(os.getenv("PORT", "8100"))
+BROWSER_AGENT_WS_MAX_SIZE: int = int(
+    os.getenv("BROWSER_AGENT_WS_MAX_SIZE", str(64 * 1024 * 1024))
+)
 
 # ── 数据库 ────────────────────────────────────────────────────────────────────
 DEFAULT_POSTGRESQL_URL = "postgresql://tally_user:123456@localhost:5432/tally"
