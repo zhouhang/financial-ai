@@ -562,6 +562,41 @@ class TestDigestDiffs:
         assert outcomes["e-a"]["outcome"] == "resolved"
         assert outcomes["e-a"]["resolved_to"] == "matched"
 
+    def test_reclassify_to_matched_with_diff_attaches_two_sided_detail(self) -> None:
+        """reclassified→matched_with_diff 必须带回重捞后的两侧明细。
+
+        修复"金额不一致但详情只有一边":原 target_only 详情里 source 侧为空,
+        消化重捞到对侧后改判 matched_with_diff,要把两侧行 + compare_values 一起带回。
+        """
+        outcomes = _digest(
+            [_open_diff("e-c", "target_only", "C")],
+            _side_df([("C", "9")]),
+            _side_df([("C", "10")]),
+        )
+        entry = outcomes["e-c"]
+        assert entry["outcome"] == "reclassified"
+        assert entry["new_type"] == "matched_with_diff"
+        detail = entry.get("refreshed_detail")
+        assert detail is not None, "reclassify→matched_with_diff 应带 refreshed_detail"
+        assert detail["anomaly_type"] == "matched_with_diff"
+        assert detail["detail_unavailable"] is False
+        # 两侧都要有数据
+        assert detail["source_record"]["金额"] == "9"
+        assert detail["target_record"]["金额"] == "10"
+        cv = detail["compare_values"][0]
+        assert cv["source_value"] == "9"
+        assert cv["target_value"] == "10"
+
+    def test_reclassify_to_one_sided_bucket_has_no_refreshed_detail(self) -> None:
+        """改判回 source_only/target_only(本就单边)不需要 refreshed_detail。"""
+        outcomes = _digest(
+            [_open_diff("e-a", "matched_with_diff", "A")],
+            _side_df([("A", "10")]),
+            _side_df([]),
+        )
+        assert outcomes["e-a"]["new_type"] == "source_only"
+        assert outcomes["e-a"].get("refreshed_detail") is None
+
     def test_matched_with_diff_target_gone_reclassifies_to_source_only(self) -> None:
         outcomes = _digest(
             [_open_diff("e-a", "matched_with_diff", "A")],

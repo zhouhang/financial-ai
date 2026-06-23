@@ -11615,13 +11615,23 @@ def _digestion_reclassified_summary(
     return original_summary
 
 
-def _digestion_reclassified_detail(detail_json: Any, new_type: str) -> dict:
+def _digestion_reclassified_detail(
+    detail_json: Any, new_type: str, refreshed_detail: Any = None
+) -> dict:
     if isinstance(detail_json, str):
         try:
             detail_json = json.loads(detail_json)
         except (TypeError, ValueError):
             detail_json = {}
     detail = dict(detail_json) if isinstance(detail_json, dict) else {}
+    # 改判成 matched_with_diff 时,原快照常是单边(改判前为 source_only/target_only,
+    # 对侧字段为空)。消化已重捞到两侧并重算了 compare_values,这里整体并入,
+    # 否则详情会出现"金额不一致却只有一边数据"。
+    if new_type == "matched_with_diff" and isinstance(refreshed_detail, dict) and refreshed_detail:
+        for field in ("raw_record", "source_record", "target_record", "compare_values", "join_key"):
+            if field in refreshed_detail:
+                detail[field] = refreshed_detail[field]
+        detail["detail_unavailable"] = bool(refreshed_detail.get("detail_unavailable", False))
     detail["anomaly_type"] = new_type
     detail["display_reclassified"] = True
     return detail
@@ -11704,6 +11714,7 @@ def apply_diff_digestion_results(
                         old_detail = _digestion_reclassified_detail(
                             exception_row.get("detail_json") if isinstance(exception_row, dict) else {},
                             new_type,
+                            refreshed_detail=item.get("refreshed_detail"),
                         )
                         new_summary = _digestion_reclassified_summary(
                             original_summary=str(

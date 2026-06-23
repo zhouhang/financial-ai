@@ -23,6 +23,59 @@ from auth import db as auth_db
 # 本地库已有的公司(武汉福游网络科技有限公司),与 test_handoff_session_db.py 一致
 COMPANY_ID = "00000000-0000-0000-0000-000000000001"
 
+
+# ---------------------------------------------------------------------------
+# _digestion_reclassified_detail:纯函数,改判 matched_with_diff 要并入两侧明细
+# ---------------------------------------------------------------------------
+
+class TestReclassifiedDetailMerge:
+    def test_merges_refreshed_two_sided_detail_for_matched_with_diff(self) -> None:
+        stale = _target_only_detail_json("OID-1")
+        refreshed = {
+            "anomaly_type": "matched_with_diff",
+            "detail_unavailable": False,
+            "join_key": [
+                {
+                    "source_field": "订单编号",
+                    "source_value": "OID-1",
+                    "target_field": "订单号",
+                    "target_value": "OID-1",
+                }
+            ],
+            "raw_record": {"source_订单编号": "OID-1", "target_订单号": "OID-1"},
+            "source_record": {"订单编号": "OID-1", "金额": "9"},
+            "target_record": {"订单号": "OID-1", "金额": "10"},
+            "compare_values": [
+                {
+                    "name": "金额",
+                    "source_field": "金额",
+                    "source_value": "9",
+                    "target_field": "金额",
+                    "target_value": "10",
+                }
+            ],
+        }
+        out = auth_db._digestion_reclassified_detail(
+            stale, "matched_with_diff", refreshed_detail=refreshed
+        )
+        assert out["anomaly_type"] == "matched_with_diff"
+        assert out["display_reclassified"] is True
+        # 两侧都被刷新进来,不再是单边残缺
+        assert out["source_record"] == {"订单编号": "OID-1", "金额": "9"}
+        assert out["target_record"] == {"订单号": "OID-1", "金额": "10"}
+        assert out["compare_values"][0]["source_value"] == "9"
+        assert out["compare_values"][0]["target_value"] == "10"
+        assert out["raw_record"]["source_订单编号"] == "OID-1"
+        assert out["detail_unavailable"] is False
+
+    def test_without_refreshed_detail_keeps_old_behavior(self) -> None:
+        stale = _target_only_detail_json("OID-2")
+        out = auth_db._digestion_reclassified_detail(stale, "source_only")
+        assert out["anomaly_type"] == "source_only"
+        assert out["display_reclassified"] is True
+        # 未提供刷新明细 → 不杜撰,保持原样
+        assert out["source_record"] == {"订单编号": None}
+
 _INITIAL_SUMMARY = {
     "matched_exact": 10,
     "matched_with_diff": 0,
@@ -365,6 +418,64 @@ class TestApplyDiffDigestionResults:
             assert "博宽服务专营店-店铺订单 与 博宽服务专营店-收支明细" in row["summary"]
             assert "金额差异" in row["summary"]
             assert "3306514334587002794" in row["summary"]
+        finally:
+            _delete_run(run_id)
+
+    def test_reclassify_merges_refreshed_two_sided_detail(self) -> None:
+        """改判 matched_with_diff 带 refreshed_detail 时,详情两侧齐全(修复单边残缺)。"""
+        run_id = _create_run()
+        exception_id = _create_exception(
+            run_id,
+            anomaly_key="td-key",
+            anomaly_type="target_only",
+            detail_json=_target_only_detail_json("OID-9"),
+        )
+        try:
+            auth_db.apply_diff_digestion_results(
+                run_id=run_id,
+                results=[
+                    {
+                        "exception_id": exception_id,
+                        "outcome": "reclassified",
+                        "new_type": "matched_with_diff",
+                        "resolved_to": "matched_with_diff",
+                        "refreshed_detail": {
+                            "anomaly_type": "matched_with_diff",
+                            "detail_unavailable": False,
+                            "join_key": [
+                                {
+                                    "source_field": "订单编号",
+                                    "source_value": "OID-9",
+                                    "target_field": "订单号",
+                                    "target_value": "OID-9",
+                                }
+                            ],
+                            "raw_record": {"source_金额": "9", "target_金额": "10"},
+                            "source_record": {"订单编号": "OID-9", "金额": "9"},
+                            "target_record": {"订单号": "OID-9", "金额": "10"},
+                            "compare_values": [
+                                {
+                                    "name": "金额",
+                                    "source_field": "金额",
+                                    "source_value": "9",
+                                    "target_field": "金额",
+                                    "target_value": "10",
+                                }
+                            ],
+                        },
+                    }
+                ],
+                review_round=1,
+            )
+            row = _fetch_exception(exception_id)
+            detail = row["detail_json"]
+            assert detail["anomaly_type"] == "matched_with_diff"
+            assert detail["display_reclassified"] is True
+            # 两侧都有数据,不再是"金额不一致却只有一边"
+            assert detail["source_record"] == {"订单编号": "OID-9", "金额": "9"}
+            assert detail["target_record"] == {"订单号": "OID-9", "金额": "10"}
+            assert detail["compare_values"][0]["source_value"] == "9"
+            assert detail["compare_values"][0]["target_value"] == "10"
         finally:
             _delete_run(run_id)
 

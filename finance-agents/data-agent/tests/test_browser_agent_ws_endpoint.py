@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import sys
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,3 +56,19 @@ def test_hello_then_claim_relays_to_mcp(monkeypatch):
         ws.send_json({"type": "claim", "id": "r1"})
         reply = ws.receive_json()
         assert reply == {"type": "result", "id": "r1", "ok": True, "data": {"job": {"id": "job-1"}}}
+
+
+def test_main_configures_browser_agent_ws_max_size(monkeypatch):
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=fake_run))
+    monkeypatch.setattr(server, "BROWSER_AGENT_WS_MAX_SIZE", 64 * 1024 * 1024)
+
+    server.main()
+
+    assert captured["args"] == ("server:app",)
+    assert captured["kwargs"]["ws_max_size"] == 64 * 1024 * 1024

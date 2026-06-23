@@ -528,6 +528,40 @@ def test_playbook_accepts_qianniu_export_report_download_action() -> None:
     assert msg.playbook_body.steps[6].requested_after_from == "extracted.report_requested_at"
 
 
+def test_playbook_accepts_bill_summary_detail_files_action() -> None:
+    playbook = _valid_playbook_body()
+    steps = playbook["steps"]  # type: ignore[index]
+    assert isinstance(steps, list)
+    steps[6] = {
+        "id": "download_expense_detail_files",
+        "action": "download_bill_summary_detail_files",
+        "bill_type_label": "结算通用账单",
+        "bill_type_selector": ".next-select:has-text('账单类型')",
+        "summary_row_selector": "tr.next-table-row",
+        "summary_detail_button_selector": "button:has-text('下载明细')",
+        "history_open_selector": "button:has-text('历史下载记录')",
+        "history_row_selector": "tr.next-table-row",
+        "history_completed_status_text": "已完成",
+        "history_download_selector": "button:has-text('下载')",
+        "timeout_ms": 900000,
+    }
+
+    msg = RunPlaybookMessage.model_validate(
+        {
+            "job_id": "job-001",
+            "shop_id": "shop-001",
+            "playbook_id": "qianniu-daily-bill-export",
+            "playbook_version": "1.0.0",
+            "playbook_body": playbook,
+            "params": {"biz_date": "2026-05-18"},
+            "runtime_profile_ref": "profiles/shop-001",
+        }
+    )
+
+    assert msg.playbook_body.steps[6].action == "download_bill_summary_detail_files"
+    assert msg.playbook_body.steps[6].bill_type_label == "结算通用账单"
+
+
 def test_playbook_accepts_ensure_page_ready_action() -> None:
     playbook = _valid_playbook_body()
     steps = playbook["steps"]  # type: ignore[index]
