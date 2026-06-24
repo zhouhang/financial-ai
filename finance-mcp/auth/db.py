@@ -11570,10 +11570,10 @@ def _digestion_reclassified_detail(
         except (TypeError, ValueError):
             detail_json = {}
     detail = dict(detail_json) if isinstance(detail_json, dict) else {}
-    # 改判成 matched_with_diff 时,原快照常是单边(改判前为 source_only/target_only,
-    # 对侧字段为空)。消化已重捞到两侧并重算了 compare_values,这里整体并入,
-    # 否则详情会出现"金额不一致却只有一边数据"。
-    if new_type == "matched_with_diff" and isinstance(refreshed_detail, dict) and refreshed_detail:
+    # 重匹成 matched(resolved 关闭)/ matched_with_diff 时,原快照常是单边
+    # (改判前为 source_only/target_only,对侧字段为空)。消化已重捞到两侧并重算了
+    # compare_values,这里整体并入,否则详情会出现"已对上/金额不一致却只有一边数据"。
+    if new_type in ("matched", "matched_with_diff") and isinstance(refreshed_detail, dict) and refreshed_detail:
         for field in ("raw_record", "source_record", "target_record", "compare_values", "join_key"):
             if field in refreshed_detail:
                 detail[field] = refreshed_detail[field]
@@ -11626,20 +11626,61 @@ def apply_diff_digestion_results(
                         raise ValueError(f"非法消化结果条目: outcome={outcome!r}, exception_id={exception_id!r}")
                     if outcome == "resolved":
                         resolved_to = str(item.get("resolved_to") or "matched").strip()
-                        cur.execute(
-                            """
-                            UPDATE execution_run_exceptions
-                            SET is_closed = TRUE,
-                                processing_status = 'verified_closed',
-                                fix_status = 'resolved_by_digestion',
-                                resolved_to = %s,
-                                resolved_at = CURRENT_TIMESTAMP,
-                                review_round = %s,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE id = %s AND run_id = %s
-                            """,
-                            (resolved_to, review_round, exception_id, run_id),
-                        )
+                        refreshed_detail = item.get("refreshed_detail")
+                        if isinstance(refreshed_detail, dict) and refreshed_detail:
+                            # 关闭成 matched 时也刷新详情:原快照常是单边(source_only/
+                            # target_only),消化已重捞到两侧 → 并入,免得"已对上却只有一边数据"。
+                            cur.execute(
+                                "SELECT detail_json FROM execution_run_exceptions "
+                                "WHERE id = %s AND run_id = %s FOR UPDATE",
+                                (exception_id, run_id),
+                            )
+                            exception_row = cur.fetchone()
+                            if not exception_row:
+                                raise ValueError(
+                                    f"消化回写未命中异常记录 (run_id={run_id}, exception_id={exception_id})"
+                                )
+                            merged_detail = _digestion_reclassified_detail(
+                                exception_row.get("detail_json") if isinstance(exception_row, dict) else {},
+                                "matched",
+                                refreshed_detail=refreshed_detail,
+                            )
+                            cur.execute(
+                                """
+                                UPDATE execution_run_exceptions
+                                SET is_closed = TRUE,
+                                    processing_status = 'verified_closed',
+                                    fix_status = 'resolved_by_digestion',
+                                    resolved_to = %s,
+                                    resolved_at = CURRENT_TIMESTAMP,
+                                    review_round = %s,
+                                    detail_json = %s::jsonb,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = %s AND run_id = %s
+                                """,
+                                (
+                                    resolved_to,
+                                    review_round,
+                                    psycopg2.extras.Json(merged_detail),
+                                    exception_id,
+                                    run_id,
+                                ),
+                            )
+                        else:
+                            cur.execute(
+                                """
+                                UPDATE execution_run_exceptions
+                                SET is_closed = TRUE,
+                                    processing_status = 'verified_closed',
+                                    fix_status = 'resolved_by_digestion',
+                                    resolved_to = %s,
+                                    resolved_at = CURRENT_TIMESTAMP,
+                                    review_round = %s,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE id = %s AND run_id = %s
+                                """,
+                                (resolved_to, review_round, exception_id, run_id),
+                            )
                     elif outcome == "reclassified":
                         if not new_type:
                             raise ValueError(f"reclassified 结果缺少 new_type (exception_id={exception_id})")
