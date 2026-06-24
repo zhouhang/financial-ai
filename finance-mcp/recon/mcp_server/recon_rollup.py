@@ -18,8 +18,6 @@ REQUIRED_CANONICAL_FIELDS = set(CANONICAL_FIELDS)
 MONEY_FIELDS = {"receivable_amount", "refund_amount", "settled_amount"}
 DATETIME_FIELDS = {"pay_time", "settle_time", "finish_time"}
 
-_COHORT = {"matched_exact", "matched_with_diff", "left_only"}
-_SETTLED = {"matched_exact", "matched_with_diff"}
 _BUCKET_TO_STATUS = {
     "matched_exact": "matched_exact",
     "matched_with_diff": "matched_with_diff",
@@ -111,17 +109,29 @@ def compute_recon_rollup(
     settled = _numeric_series(df, "settled_amount")
     net_receivable = (receivable - refund).clip(lower=0.0)
 
-    cohort = match_status.isin(_COHORT)
-    settled_mask = match_status.isin(_SETTLED)
-    in_transit = match_status.eq("left_only")
+    # 金额口径一律按"哪个 canonical 金额字段有值"判定,不绑定 left/right——
+    # 否则一旦某方案把账单配在左、订单配在右,left_only 就成了"未匹配账单",口径全错。
+    # 这只依赖应收/到账两个映射(与顶部买家实付/已到账同源),不引入新的方向假设。
+    recv_present = (
+        pd.to_numeric(df["receivable_amount"], errors="coerce").notna()
+        if "receivable_amount" in df.columns
+        else pd.Series(False, index=df.index)
+    )
+    settled_present = (
+        pd.to_numeric(df["settled_amount"], errors="coerce").notna()
+        if "settled_amount" in df.columns
+        else pd.Series(False, index=df.index)
+    )
+
+    cohort = recv_present                            # 有应收 = 订单(我方应收口径)
+    settled_mask = recv_present & settled_present    # 应收且已到账 = 已结算
+    in_transit = recv_present & ~settled_present     # 有应收、无到账 = 在途(方向无关)
     diff_mask = match_status.eq("matched_with_diff")
 
-    as_of_date = pd.Timestamp(as_of_ts).normalize()
+    # 在途只给"确定可算"的净额总额,不再按账龄切"正常在途/待核查超期"——账龄需要平台特定
+    # 的支付/结算时点锚点 + T+N 周期,跨平台/跨对账类型不可靠(下单≠支付、发生时间≠结算完成),
+    # 硬算只会产生静默假 0。stuck_days_n/as_of_ts 暂保留在签名中兼容调用方,本计算不再使用。
     pay_time = _datetime_series(df, "pay_time")
-    aging_days = (as_of_date - pay_time.dt.normalize()).dt.days
-    normal_mask = in_transit & (aging_days <= int(stuck_days_n))
-    stuck_mask = in_transit & (aging_days > int(stuck_days_n))
-
     settle_time = _datetime_series(df, "settle_time")
     payback_days = (settle_time - pay_time).dt.days
     payback_valid = settled_mask & pay_time.notna() & settle_time.notna()
@@ -134,8 +144,8 @@ def compute_recon_rollup(
         "refund_amount_total": float(refund[cohort].sum()),
         "net_receivable_amount_total": float(net_receivable[cohort].sum()),
         "settled_amount_total": float(settled[settled_mask].sum()),
-        "normal_in_transit_amount_total": float(net_receivable[normal_mask].sum()),
-        "stuck_amount_total": float(net_receivable[stuck_mask].sum()),
+        "normal_in_transit_amount_total": float(net_receivable[in_transit].sum()),
+        "stuck_amount_total": 0.0,
         "net_deduction_total": net_deduction_total,
         "net_deduction_rate": (
             net_deduction_total / net_recv_settled_sum if net_recv_settled_sum > 0 else None
@@ -143,8 +153,8 @@ def compute_recon_rollup(
         "diff_amount_total": float((net_receivable[diff_mask] - settled[diff_mask]).sum()),
         "cohort_order_count": int(cohort.sum()),
         "settled_order_count": int(settled_mask.sum()),
-        "normal_in_transit_count": int(normal_mask.sum()),
-        "stuck_order_count": int(stuck_mask.sum()),
+        "normal_in_transit_count": int(in_transit.sum()),
+        "stuck_order_count": 0,
         "matched_with_diff_count": int(diff_mask.sum()),
         "source_only_count": int(in_transit.sum()),
         "target_only_count": int(match_status.eq("right_only").sum()),

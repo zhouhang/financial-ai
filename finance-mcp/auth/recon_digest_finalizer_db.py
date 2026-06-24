@@ -531,7 +531,7 @@ def _build_narrative(*, biz_date: str, view: str, structured: dict[str, Any]) ->
             f"{biz_date} 对账日报已完成。"
             f"买家实付 {totals.get('receivable_total', 0):,.2f}，"
             f"已到账 {totals.get('settled_total', 0):,.2f}，"
-            f"待核查 {totals.get('stuck_amount', 0):,.2f}。"
+            f"在途（未到账）{totals.get('normal_in_transit_amount', 0):,.2f}。"
         )
     return (
         f"{biz_date} 对账底稿已生成。"

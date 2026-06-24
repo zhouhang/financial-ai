@@ -145,20 +145,48 @@ def test_compute_rollup_golden_fixture() -> None:
     assert rollup["refund_amount_total"] == 30.0
     assert rollup["net_receivable_amount_total"] == 399.9
     assert rollup["settled_amount_total"] == 247.5
-    assert rollup["normal_in_transit_amount_total"] == 50.0
-    assert rollup["stuck_amount_total"] == 50.0
+    # 在途 = 全部 left_only 净额(C=50 + D=80-30=50),不再按账龄切分;stuck 恒为 0
+    assert rollup["normal_in_transit_amount_total"] == 100.0
+    assert rollup["stuck_amount_total"] == 0.0
     assert rollup["net_deduction_total"] == pytest.approx(52.4)
     assert rollup["net_deduction_rate"] == pytest.approx(52.4 / 299.9)
     assert rollup["diff_amount_total"] == pytest.approx(50.0)
     assert rollup["cohort_order_count"] == 4
     assert rollup["settled_order_count"] == 2
-    assert rollup["normal_in_transit_count"] == 1
-    assert rollup["stuck_order_count"] == 1
+    assert rollup["normal_in_transit_count"] == 2
+    assert rollup["stuck_order_count"] == 0
     assert rollup["matched_with_diff_count"] == 1
     assert rollup["source_only_count"] == 2
     assert rollup["target_only_count"] == 1
     assert rollup["payback_days_sum"] == 3.0
     assert rollup["payback_days_count"] == 2
+
+
+def test_compute_rollup_is_orientation_independent() -> None:
+    # 订单配在【目标侧 right】、账单配在【源侧 left】时,金额口径仍按"哪个金额字段有值"判定,
+    # 不绑定 left/right:在途=有应收无到账的订单(right_only 那笔),未匹配账单(left_only)不计入。
+    df = pd.DataFrame(
+        [
+            {"order_no": "X", "receivable_amount": 100.0, "refund_amount": 0.0,
+             "settled_amount": 95.0, "match_status": "matched_exact"},
+            {"order_no": "Y", "receivable_amount": 60.0, "refund_amount": 0.0,
+             "settled_amount": pd.NA, "match_status": "right_only"},
+            {"order_no": "Z", "receivable_amount": pd.NA, "refund_amount": pd.NA,
+             "settled_amount": 40.0, "match_status": "left_only"},
+        ]
+    )
+
+    rollup = recon_rollup.compute_recon_rollup(
+        df,
+        as_of_ts=pd.Timestamp("2026-06-06 09:00"),
+        stuck_days_n=3,
+    )
+
+    assert rollup["normal_in_transit_amount_total"] == 60.0
+    assert rollup["normal_in_transit_count"] == 1
+    assert rollup["receivable_amount_total"] == 160.0
+    assert rollup["settled_amount_total"] == 95.0
+    assert rollup["cohort_order_count"] == 2
 
 
 def test_compute_rollup_zero_denominator_rate_is_none() -> None:
@@ -242,6 +270,7 @@ def test_rollup_from_diff_result_concats_all_buckets() -> None:
 
     assert rollup["cohort_order_count"] == 2
     assert rollup["settled_order_count"] == 1
-    assert rollup["stuck_order_count"] == 1
+    assert rollup["normal_in_transit_count"] == 1
+    assert rollup["stuck_order_count"] == 0
     assert rollup["target_only_count"] == 1
     assert rollup["net_deduction_total"] == pytest.approx(2.4)
