@@ -597,6 +597,27 @@ class TestDigestDiffs:
         assert outcomes["e-a"]["new_type"] == "source_only"
         assert outcomes["e-a"].get("refreshed_detail") is None
 
+    def test_resolved_to_matched_attaches_two_sided_detail(self) -> None:
+        """source_only 重匹到对侧账单后 resolved→matched,详情也要两侧齐全。
+
+        修复"已对上却只有一边数据":回填消化关闭 source_only 时,
+        原快照只有 source 侧,resolved 关闭也要带回重捞的两侧明细。
+        """
+        outcomes = _digest(
+            [_open_diff("e-a", "source_only", "A")],
+            _side_df([("A", "10")]),
+            _side_df([("A", "10")]),
+        )
+        entry = outcomes["e-a"]
+        assert entry["outcome"] == "resolved"
+        assert entry["new_type"] == "matched"
+        detail = entry.get("refreshed_detail")
+        assert detail is not None, "resolved→matched 应带 refreshed_detail"
+        assert detail["detail_unavailable"] is False
+        # 两侧都要有数据
+        assert detail["source_record"]["金额"] == "10"
+        assert detail["target_record"]["金额"] == "10"
+
     def test_matched_with_diff_target_gone_reclassifies_to_source_only(self) -> None:
         outcomes = _digest(
             [_open_diff("e-a", "matched_with_diff", "A")],

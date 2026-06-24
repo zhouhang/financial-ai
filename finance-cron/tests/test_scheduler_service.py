@@ -223,3 +223,64 @@ def test_execute_collection_job_passes_slot_idempotency_key(monkeypatch):
     call = triggered[0]
     schedule_slot = str((call["params"] or {}).get("schedule_slot"))
     assert call["idempotency_key"] == f"collection:source_001:dataset_001:{schedule_slot}"
+
+
+def test_sweep_diff_digestion_job_calls_per_company_with_window(monkeypatch):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_load_enabled_run_plans(scheduler_token: str):
+        return [
+            {"company_id": "company_001", "plan_code": "plan_a"},
+            {"company_id": "company_001", "plan_code": "plan_b"},
+            {"company_id": "company_002", "plan_code": "plan_c"},
+        ]
+
+    async def fake_sweep(auth_token: str, *, since_date: str):
+        calls.append({"auth_token": auth_token, "since_date": since_date})
+        return {"success": True, "scanned": 3, "enqueued": 2, "skipped": 1}
+
+    monkeypatch.setattr(
+        scheduler_service,
+        "create_scheduler_auth_token",
+        lambda **kwargs: f"token:{kwargs.get('company_id', 'system')}",
+    )
+    monkeypatch.setattr(scheduler_service, "trigger_diff_digestion_sweep", fake_sweep)
+
+    service = scheduler_service.FinanceCronSchedulerService(
+        scheduler_service.FinanceCronConfig(
+            sweep_digestion_enabled=True,
+            digestion_window_days=15,
+        )
+    )
+    monkeypatch.setattr(service, "_load_enabled_run_plans", fake_load_enabled_run_plans)
+
+    asyncio.run(service.sweep_diff_digestion_job())
+
+    # 每公司一次,token 公司隔离
+    assert [call["auth_token"] for call in calls] == ["token:company_001", "token:company_002"]
+    # since_date = 今天(Asia/Shanghai) - window_days
+    expected = (
+        datetime.now(ZoneInfo("Asia/Shanghai")).date() - timedelta(days=15)
+    ).isoformat()
+    assert all(call["since_date"] == expected for call in calls)
+
+
+def test_sweep_diff_digestion_job_disabled_does_nothing(monkeypatch):
+    calls: list[int] = []
+
+    async def fake_sweep(auth_token: str, *, since_date: str):
+        calls.append(1)
+        return {"success": True}
+
+    monkeypatch.setattr(scheduler_service, "trigger_diff_digestion_sweep", fake_sweep)
+
+    service = scheduler_service.FinanceCronSchedulerService(
+        scheduler_service.FinanceCronConfig(sweep_digestion_enabled=False)
+    )
+
+    asyncio.run(service.sweep_diff_digestion_job())
+
+    assert calls == []

@@ -133,8 +133,12 @@ def digest_diffs(
     key_set = {token for token in diff_tokens if token}
 
     bucket_keys: dict[str, set[str]] = {name: set() for name in _COMPARISON_BUCKETS}
-    # 改判成 matched_with_diff 时,要把重捞后的两侧明细带回回写层,避免详情只剩单边。
-    mwd_detail_by_token: dict[str, dict[str, Any]] = {}
+    # 重匹成 matched_exact / matched_with_diff 时,把重捞后的两侧明细带回回写层,
+    # 避免详情只剩单边("已对上/金额不一致却只有一边数据")。按桶分别索引。
+    matched_detail_by_token: dict[str, dict[str, dict[str, Any]]] = {
+        "matched_exact": {},
+        "matched_with_diff": {},
+    }
     if key_set:
         sub_source = load_side_rows_for_keys(
             full_df=source_df, key_field=source_key_field, keys=key_set
@@ -170,22 +174,24 @@ def digest_diffs(
                 if token:
                     bucket_keys[bucket_name].add(token)
 
-        # 用对账引擎同一套明细构造器重建两侧齐全的明细,按 key 索引,
-        # 供改判 matched_with_diff 的条目回写时替换残缺的单边快照。
+        # 用对账引擎同一套明细构造器重建两侧齐全的明细,按桶+key 索引,
+        # 供 resolved→matched / reclassified→matched_with_diff 回写时替换单边快照。
         for detail_row in recon_tool._build_anomaly_rows(
             comparison or {},
             key_mappings=key_mappings,
             compare_columns_config=compare_columns_config,
+            anomaly_types=("matched_exact", "matched_with_diff"),
         ):
-            if detail_row.get("anomaly_type") != "matched_with_diff":
+            atype = detail_row.get("anomaly_type")
+            if atype not in matched_detail_by_token:
                 continue
             join_key = detail_row.get("join_key") or []
             detail_token = ""
             if join_key:
                 detail_token = _normalize_key_token(join_key[0].get("source_value")) or \
                     _normalize_key_token(join_key[0].get("target_value"))
-            if detail_token and detail_token not in mwd_detail_by_token:
-                mwd_detail_by_token[detail_token] = detail_row
+            if detail_token and detail_token not in matched_detail_by_token[atype]:
+                matched_detail_by_token[atype][detail_token] = detail_row
 
     results: list[dict[str, Any]] = []
     for diff, token in zip(open_diffs, diff_tokens):
@@ -198,9 +204,10 @@ def digest_diffs(
         entry["new_type"] = new_type
         if resolved_to is not None:
             entry["resolved_to"] = resolved_to
-        # 改判为 matched_with_diff:带回重捞后的两侧明细(单边桶无需,详情本就单边)。
-        if outcome == "reclassified" and new_type == "matched_with_diff":
-            refreshed = mwd_detail_by_token.get(token)
+        # 重匹成 matched / matched_with_diff:带回重捞后的两侧明细(单边桶无需,详情本就单边)。
+        if new_type in ("matched", "matched_with_diff"):
+            bucket = "matched_exact" if new_type == "matched" else "matched_with_diff"
+            refreshed = matched_detail_by_token[bucket].get(token)
             if refreshed is not None:
                 entry["refreshed_detail"] = refreshed
         results.append(entry)

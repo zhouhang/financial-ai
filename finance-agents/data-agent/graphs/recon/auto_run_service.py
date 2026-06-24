@@ -46,6 +46,9 @@ from tools.mcp_client import (
     recon_exception_create,
     recon_exception_get,
     recon_exception_update,
+    recon_queue_enqueue,
+    recon_queue_find_active,
+    recon_runs_pending_redigestion,
 )
 
 logger = logging.getLogger(__name__)
@@ -2204,3 +2207,67 @@ async def send_execution_run_exception_reminder(
             "message_id": next_feedback.get("message_id"),
         },
     }
+
+
+async def sweep_diff_digestion(*, company_id: str, since_date: str) -> dict[str, Any]:
+    """回填消化:列出 since_date 起仍有 open 差异的历史 run,去重后逐个入队 resolve job。
+
+    解决 source_only 永不关闭——结算账单后到,需对老 run 用当前全量数据重判一次。
+    复用现成 resolve 路径(worker 已支持)+ find_active 去重(避免重复排队)。
+    对所有对账任务统一生效,不按平台/客户区分。
+    """
+    listing = await recon_runs_pending_redigestion(company_id=company_id, since_date=since_date)
+    if not listing.get("success"):
+        return {
+            "success": False,
+            "error": str(listing.get("error") or "列出待回填消化 run 失败"),
+            "scanned": 0,
+            "enqueued": 0,
+            "skipped": 0,
+        }
+    runs = listing.get("runs") or []
+    enqueued = 0
+    skipped = 0
+    for run in runs:
+        run_id = str(run.get("run_id") or "").strip()
+        plan_code = str(run.get("plan_code") or "").strip()
+        biz_date = str(run.get("biz_date") or "").strip()
+        if not run_id or not plan_code:
+            skipped += 1
+            continue
+        active = await recon_queue_find_active(
+            company_id=company_id, trigger_mode="resolve", target_run_id=run_id
+        )
+        if active.get("found"):
+            skipped += 1
+            continue
+        enq = await recon_queue_enqueue(
+            company_id=company_id,
+            run_plan_code=plan_code,
+            biz_date=biz_date,
+            trigger_mode="resolve",
+            run_context={
+                "target_run_id": run_id,
+                "execution_run_id": run_id,
+                "biz_date": biz_date,
+            },
+        )
+        if enq.get("success"):
+            enqueued += 1
+        else:
+            skipped += 1
+            logger.warning(
+                "[diff_digestion_sweep] 入队失败 run_id=%s plan=%s error=%s",
+                run_id,
+                plan_code,
+                enq.get("error"),
+            )
+    logger.info(
+        "[diff_digestion_sweep] company=%s since=%s scanned=%s enqueued=%s skipped=%s",
+        company_id,
+        since_date,
+        len(runs),
+        enqueued,
+        skipped,
+    )
+    return {"success": True, "scanned": len(runs), "enqueued": enqueued, "skipped": skipped}

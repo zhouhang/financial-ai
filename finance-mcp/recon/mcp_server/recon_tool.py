@@ -1213,9 +1213,10 @@ def _build_anomaly_rows(
     *,
     key_mappings: list[dict[str, str]],
     compare_columns_config: list[dict[str, Any]],
+    anomaly_types: tuple[str, ...] = ("matched_with_diff", "source_only", "target_only"),
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for anomaly_type in ("matched_with_diff", "source_only", "target_only"):
+    for anomaly_type in anomaly_types:
         df = diff_result.get(anomaly_type)
         if df is None or df.empty:
             continue

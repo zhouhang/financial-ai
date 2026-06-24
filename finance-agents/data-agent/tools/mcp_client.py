@@ -5236,6 +5236,17 @@ async def recon_queue_find_active(
     })
 
 
+async def recon_runs_pending_redigestion(
+    company_id: str,
+    since_date: str,
+) -> dict[str, Any]:
+    """列出 since_date 起待回填消化的 run(success + open 异常 + 有 plan_code)。"""
+    return await call_mcp_tool("recon_runs_pending_redigestion", {
+        "company_id": company_id,
+        "since_date": since_date,
+    })
+
+
 async def alipay_auth_invite_describe(token: str) -> dict[str, Any]:
     return await call_mcp_tool("alipay_auth_invite_describe", {"token": token})
 

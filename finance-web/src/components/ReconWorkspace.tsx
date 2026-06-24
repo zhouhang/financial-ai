@@ -6241,7 +6241,7 @@ export default function ReconWorkspace({
       </div>
       <div className="flex items-center justify-between gap-3 border-t border-border-subtle px-5 py-3">
         <p className="text-xs text-text-secondary">
-          第 {runsPage + 1} 页 · 每页 {RUNS_PAGE_SIZE} 条
+          第 {runsPage + 1} / {Math.max(1, Math.ceil(runsTotal / RUNS_PAGE_SIZE))} 页 · 每页 {RUNS_PAGE_SIZE} 条 · 共 {runsTotal} 条
         </p>
         <div className="flex items-center gap-2">
           <button

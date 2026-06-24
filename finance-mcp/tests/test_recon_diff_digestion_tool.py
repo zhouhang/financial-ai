@@ -76,6 +76,40 @@ class TestReclassifiedDetailMerge:
         # 未提供刷新明细 → 不杜撰,保持原样
         assert out["source_record"] == {"订单编号": None}
 
+    def test_merges_refreshed_two_sided_detail_for_resolved_matched(self) -> None:
+        """resolved→matched(回填消化关闭 source_only)也要并入两侧明细。"""
+        stale = _target_only_detail_json("OID-3")
+        refreshed = {
+            "anomaly_type": "matched_exact",
+            "detail_unavailable": False,
+            "join_key": [
+                {
+                    "source_field": "订单编号",
+                    "source_value": "OID-3",
+                    "target_field": "订单号",
+                    "target_value": "OID-3",
+                }
+            ],
+            "raw_record": {"source_订单编号": "OID-3", "target_订单号": "OID-3"},
+            "source_record": {"订单编号": "OID-3", "金额": "10"},
+            "target_record": {"订单号": "OID-3", "金额": "10"},
+            "compare_values": [
+                {
+                    "name": "金额",
+                    "source_field": "金额",
+                    "source_value": "10",
+                    "target_field": "金额",
+                    "target_value": "10",
+                }
+            ],
+        }
+        out = auth_db._digestion_reclassified_detail(stale, "matched", refreshed_detail=refreshed)
+        # 两侧都被刷新进来,不再是单边残缺
+        assert out["source_record"] == {"订单编号": "OID-3", "金额": "10"}
+        assert out["target_record"] == {"订单号": "OID-3", "金额": "10"}
+        assert out["compare_values"][0]["target_value"] == "10"
+        assert out["detail_unavailable"] is False
+
 _INITIAL_SUMMARY = {
     "matched_exact": 10,
     "matched_with_diff": 0,
@@ -476,6 +510,63 @@ class TestApplyDiffDigestionResults:
             assert detail["target_record"] == {"订单号": "OID-9", "金额": "10"}
             assert detail["compare_values"][0]["source_value"] == "9"
             assert detail["compare_values"][0]["target_value"] == "10"
+        finally:
+            _delete_run(run_id)
+
+    def test_resolved_match_writes_two_sided_detail(self) -> None:
+        """回填消化把 source_only 关闭成 matched 时,带 refreshed_detail → 详情两侧齐全且已关闭。"""
+        run_id = _create_run()
+        exception_id = _create_exception(
+            run_id,
+            anomaly_key="so-key",
+            anomaly_type="source_only",
+            detail_json=_target_only_detail_json("OID-7"),
+        )
+        try:
+            auth_db.apply_diff_digestion_results(
+                run_id=run_id,
+                results=[
+                    {
+                        "exception_id": exception_id,
+                        "outcome": "resolved",
+                        "new_type": "matched",
+                        "resolved_to": "matched",
+                        "refreshed_detail": {
+                            "anomaly_type": "matched_exact",
+                            "detail_unavailable": False,
+                            "join_key": [
+                                {
+                                    "source_field": "订单编号",
+                                    "source_value": "OID-7",
+                                    "target_field": "订单号",
+                                    "target_value": "OID-7",
+                                }
+                            ],
+                            "raw_record": {"source_金额": "10", "target_金额": "10"},
+                            "source_record": {"订单编号": "OID-7", "金额": "10"},
+                            "target_record": {"订单号": "OID-7", "金额": "10"},
+                            "compare_values": [
+                                {
+                                    "name": "金额",
+                                    "source_field": "金额",
+                                    "source_value": "10",
+                                    "target_field": "金额",
+                                    "target_value": "10",
+                                }
+                            ],
+                        },
+                    }
+                ],
+                review_round=1,
+            )
+            row = _fetch_exception(exception_id)
+            assert row["is_closed"] is True
+            assert row["resolved_to"] == "matched"
+            detail = row["detail_json"]
+            # 已对上,但两侧都要有数据(不再单边)
+            assert detail["source_record"] == {"订单编号": "OID-7", "金额": "10"}
+            assert detail["target_record"] == {"订单号": "OID-7", "金额": "10"}
+            assert detail["detail_unavailable"] is False
         finally:
             _delete_run(run_id)
 
