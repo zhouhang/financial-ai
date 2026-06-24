@@ -11923,6 +11923,55 @@ def fail_recon_run(job_id: str, error: str = "") -> None:
         logger.error(f"fail_recon_run 失败 (job_id={job_id}): {e}")
 
 
+def list_runs_pending_redigestion(
+    *,
+    company_id: str,
+    since_date: str,
+) -> list[dict]:
+    """回填消化 sweep 选 run:窗口内、success、仍有 open 异常、且有 plan_code 的 run。
+
+    不按 scheme/平台过滤(回填消化对所有对账任务统一生效)。
+    biz_date 为 'YYYY-MM-DD' 字符串,ISO 字典序比较即时序比较。
+    返回每条 {"run_id", "plan_code", "biz_date", "scheme_code"}。
+    """
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT r.id AS run_id,
+                           r.plan_code,
+                           r.scheme_code,
+                           r.run_context_json->>'biz_date' AS biz_date
+                    FROM execution_runs r
+                    WHERE r.company_id = %s
+                      AND r.execution_status = 'success'
+                      AND r.plan_code IS NOT NULL
+                      AND r.plan_code <> ''
+                      AND r.run_context_json->>'biz_date' >= %s
+                      AND EXISTS (
+                          SELECT 1 FROM execution_run_exceptions e
+                          WHERE e.run_id = r.id AND e.is_closed = FALSE
+                      )
+                    ORDER BY r.run_context_json->>'biz_date' ASC, r.created_at ASC
+                    """,
+                    (company_id, since_date),
+                )
+                return [
+                    {
+                        "run_id": str(row["run_id"]),
+                        "plan_code": row["plan_code"],
+                        "scheme_code": row["scheme_code"],
+                        "biz_date": row["biz_date"],
+                    }
+                    for row in cur.fetchall()
+                ]
+    except Exception as e:
+        logger.error(f"list_runs_pending_redigestion 失败 (since_date={since_date}): {e}")
+        return []
+
+
 def find_active_recon_run(
     *,
     company_id: str,

@@ -103,6 +103,19 @@ async def trigger_run_plan(
     )
 
 
+async def trigger_diff_digestion_sweep(
+    auth_token: str,
+    *,
+    since_date: str,
+) -> dict[str, Any]:
+    """触发 data-agent 回填消化扫描:对 since_date 起仍有 open 差异的历史 run 入队 resolve 重判。"""
+    return await _post_data_agent_json(
+        "/recon/diff-digestion-sweep",
+        auth_token,
+        {"since_date": since_date},
+    )
+
+
 async def sync_pending_todo_exceptions(
     auth_token: str,
     *,

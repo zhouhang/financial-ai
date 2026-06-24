@@ -18,6 +18,7 @@ from graphs.recon.auto_run_service import (
     prepare_execution_run_rerun,
     send_exception_reminder,
     send_execution_run_exception_reminder,
+    sweep_diff_digestion,
     sync_execution_run_exception_reminder,
     sync_exception_reminder,
     sync_pending_todo_exceptions,
@@ -212,6 +213,10 @@ class RunPlanExecuteRequest(BaseModel):
     biz_date: str = ""
     trigger_mode: str = "manual"
     run_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class DiffDigestionSweepRequest(BaseModel):
+    since_date: str = ""
 
 
 class DigestSubscriptionUpsertRequest(BaseModel):
@@ -1923,6 +1928,33 @@ async def execute_run_plan(
     if not result.get("success"):
         raise HTTPException(status_code=500, detail=result.get("error", "入队失败"))
     return {"queued": True, "run_plan_code": run_plan_code, "job_id": str((result.get("job") or {}).get("id") or ""), "message": "对账任务已进入执行队列，请稍后查询运行结果"}
+
+
+@router.post("/diff-digestion-sweep")
+async def diff_digestion_sweep(
+    body: DiffDigestionSweepRequest,
+    authorization: Optional[str] = Header(None),
+):
+    """回填消化扫描:对 since_date 起仍有 open 差异的历史 run 逐个入队 resolve 重判。
+
+    供 finance-cron 凌晨定时调用,按 token 的 company 限定范围。
+    """
+    auth_token = _extract_auth_token(authorization)
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="未提供认证 token，请先登录")
+    user = _get_user_from_token(auth_token)
+    if not user or not user.get("company_id"):
+        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    since_date = str(body.since_date or "").strip()
+    if not since_date:
+        raise HTTPException(status_code=400, detail="since_date 不能为空")
+    result = await sweep_diff_digestion(
+        company_id=str(user["company_id"]),
+        since_date=since_date,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "回填消化扫描失败"))
+    return result
 
 
 @router.post("/auto-runs")

@@ -442,6 +442,18 @@ def create_tools() -> list[Tool]:
                 "required": ["company_id", "trigger_mode", "target_run_id"],
             },
         ),
+        Tool(
+            name="recon_runs_pending_redigestion",
+            description="回填消化 sweep:列出 since_date 起、success、仍有 open 异常、有 plan_code 的 run(不分平台),供逐 run 入队 resolve 重判。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "company_id": {"type": "string"},
+                    "since_date": {"type": "string"},
+                },
+                "required": ["company_id", "since_date"],
+            },
+        ),
     ]
 
 
@@ -500,6 +512,8 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
         return _queue_fail_failed_collection_waiting(arguments)
     if name == "recon_queue_find_active":
         return _queue_find_active(arguments)
+    if name == "recon_runs_pending_redigestion":
+        return _runs_pending_redigestion(arguments)
     return {"success": False, "error": f"未知工具: {name}"}
 
 
@@ -1071,5 +1085,23 @@ def _queue_find_active(arguments: dict[str, Any]) -> dict[str, Any]:
             target_run_id=target_run_id,
         )
         return {"success": True, "found": job is not None, "job": job}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _runs_pending_redigestion(arguments: dict[str, Any]) -> dict[str, Any]:
+    """列出 since_date 起待回填消化的 run(success + open 异常 + 有 plan_code)。
+    不需要 worker_token，API 层直接调用。
+    """
+    company_id = str(arguments.get("company_id") or "").strip()
+    since_date = str(arguments.get("since_date") or "").strip()
+    if not company_id or not since_date:
+        return {"success": False, "error": "company_id / since_date 不能为空"}
+    try:
+        runs = auth_db.list_runs_pending_redigestion(
+            company_id=company_id,
+            since_date=since_date,
+        )
+        return {"success": True, "runs": runs}
     except Exception as e:
         return {"success": False, "error": str(e)}
