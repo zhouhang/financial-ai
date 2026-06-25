@@ -353,10 +353,8 @@ def _compose_digest_message(
                 (
                     "资金到账总览(货款口径)\n"
                     f"买家实付 {_format_money(totals.get('receivable_total'))} → "
-                    f"退款 {_format_money(totals.get('refund_total'))} → "
                     f"已到账 {_format_money(totals.get('settled_total'))}\n"
-                    f"正常在途 {_format_money(totals.get('normal_in_transit_amount'))} ｜ "
-                    f"待核查 {_format_money(totals.get('stuck_amount'))}"
+                    f"正常在途 {_format_money(totals.get('normal_in_transit_amount'))}"
                 ),
                 narrative,
                 f"[查看完整明细]({detail_url})",
@@ -375,9 +373,7 @@ def _compose_digest_message(
             ),
             (
                 "资金归因\n"
-                f"正常在途 {_format_money(totals.get('normal_in_transit_amount'))} | "
-                f"退款 {_format_money(totals.get('refund_total'))} | "
-                f"待核查 {_format_money(totals.get('stuck_amount'))}"
+                f"正常在途 {_format_money(totals.get('normal_in_transit_amount'))}"
             ),
             narrative,
             f"[查看差异清单/导出底稿]({detail_url})",

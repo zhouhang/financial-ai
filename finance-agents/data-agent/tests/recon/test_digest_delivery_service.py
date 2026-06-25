@@ -91,6 +91,30 @@ def test_compose_finance_digest_message_omits_unavailable_net_deduction_metric()
     assert "查看差异清单/导出底稿" in content
 
 
+def test_compose_digest_message_drops_refund_and_stuck_metrics() -> None:
+    # 日报展示已去掉「退款」「待核查」，发送的消息也必须去掉，两个 view 都不能出现。
+    totals = {
+        "receivable_total": 100,
+        "refund_total": 10,
+        "settled_total": 80,
+        "normal_in_transit_amount": 5,
+        "stuck_amount": 3,
+        "matched_with_diff_count": 2,
+        "source_only_count": 1,
+        "target_only_count": 0,
+    }
+    digest = {"period_start": "2026-06-05", "structured": {"totals": totals}, "narrative": "日报说明"}
+
+    for view in ("boss", "finance"):
+        _title, content = service._compose_digest_message(
+            digest=digest,
+            subscription={"view": view},
+            detail_url="https://www.tallyai.cn/recon/digests/token/x",
+        )
+        assert "退款" not in content, f"view={view} 消息仍含退款"
+        assert "待核查" not in content, f"view={view} 消息仍含待核查"
+
+
 @pytest.mark.asyncio
 async def test_finalize_and_deliver_digest_dry_run_does_not_send(
     monkeypatch: pytest.MonkeyPatch,

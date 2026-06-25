@@ -653,6 +653,7 @@ class WindowsControlBackend:
         self._interactive_until = 0.0
         self._resume_check_requested = False
         self._input_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._last_drop_log_at = 0.0
 
     def _chrome_pids(self) -> list[int]:
         pid = getattr(getattr(self.chrome, "process", None), "pid", None)
@@ -667,6 +668,16 @@ class WindowsControlBackend:
     def bind_window(self) -> None:
         self._binder = WindowBinder(win32=self._win32, chrome_pids=self._chrome_pids())
         self._binder.bind(current_page_title=self._current_page_title())
+        # 接管诊断:绑定结果一次性打点。点击丢弃多半源于此处选错窗口或前台门禁失配,故先把
+        # 选中句柄/候选数/抓帧矩形/虚拟桌面落盘,便于下次复现时与丢弃日志对照(见 inject_mouse)。
+        try:
+            logger.info(
+                "handoff os_windows bound: handle=%s candidates=%s capture_rect=%s virtual_desktop=%s diag=%s",
+                self._binder.window_handle, self._binder.candidate_count,
+                self._binder.capture_rect, self._virtual_desktop, self.diagnostics(),
+            )
+        except Exception:
+            pass
 
     def teardown(self) -> None:
         self.stream_active = False
@@ -706,6 +717,21 @@ class WindowsControlBackend:
         )
         injector.inject(event)
         self._last_error = injector.last_error
+        # 点击被门禁丢弃时静默(历史无日志),正是"看得到、点不了"无证可查的根因。这里限频(2s)
+        # 打点:前台句柄 vs 绑定句柄。fg=0→会话锁定/RDP断连;fg≠bound→绑错窗口;两者无则查坐标映射。
+        if self._last_error is not None:
+            now = time.monotonic()
+            if now - self._last_drop_log_at >= 2.0:
+                self._last_drop_log_at = now
+                try:
+                    fg = self._win32.get_foreground_window()
+                except Exception:
+                    fg = None
+                bound = self._binder.window_handle if self._binder else None
+                logger.warning(
+                    "handoff os_windows input dropped: error=%s foreground=%s bound=%s kind=%s",
+                    self._last_error.value, fg, bound, str(event.get("kind") or ""),
+                )
 
     def inject_key(self, event: dict[str, Any]) -> None:
         key = str(event.get("key") or "")
@@ -719,6 +745,12 @@ class WindowsControlBackend:
     def inject_text(self, text: str) -> None:
         if not self._text_bridge.send_text(text):
             self._last_error = ControlErrorCode.CONTROL_UNAVAILABLE
+
+    def current_focus_editable(self) -> bool | None:
+        try:
+            return bool(self._cdp.active_element_editable())
+        except Exception:
+            return None
 
     def apply_input_event(self, event: dict[str, Any]) -> None:
         self._interactive_until = time.monotonic() + 2.0
