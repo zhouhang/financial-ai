@@ -8386,6 +8386,56 @@ def insert_browser_capture_files(
         raise
 
 
+def has_recent_nonempty_browser_collection(
+    *,
+    company_id: str,
+    data_source_id: str,
+    dataset_id: str,
+    resource_key: str | None = None,
+    before_biz_date: str,
+    lookback_days: int = 14,
+) -> bool:
+    """是否在最近 lookback_days 天内、before_biz_date 之前有过非空采集。
+
+    用于判断"今天采集到 0 行"是否异常:若该数据集往日本来就有数据,则空采集疑似平台
+    数据未就绪/采集失败,不应被当成权威成功结果。仅统计 record_status<>'deleted' 的活跃记录。
+    """
+    if not (company_id and data_source_id and dataset_id and before_biz_date):
+        return False
+    conn_manager = get_conn()
+    try:
+        with conn_manager as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    SELECT 1
+                    FROM browser_collection_records
+                    WHERE company_id = %s
+                      AND data_source_id = %s
+                      AND dataset_id = %s
+                      AND record_status <> 'deleted'
+                      AND biz_date < %s
+                      AND biz_date >= (%s::date - %s::int)
+                """
+                params: list[Any] = [
+                    company_id,
+                    data_source_id,
+                    dataset_id,
+                    before_biz_date,
+                    before_biz_date,
+                    int(lookback_days),
+                ]
+                if resource_key:
+                    sql += " AND resource_key = %s"
+                    params.append(resource_key)
+                sql += " LIMIT 1"
+                cur.execute(sql, tuple(params))
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"has_recent_nonempty_browser_collection 失败: {e}")
+        # 出错时保守地返回 False,避免误判正常空采集为失败而误触发重试/告警。
+        return False
+
+
 def list_browser_collection_records(
     *,
     company_id: str,

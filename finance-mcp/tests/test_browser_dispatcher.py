@@ -2245,6 +2245,215 @@ def test_browser_sync_job_complete_writes_records_and_files(monkeypatch) -> None
     ]
 
 
+def _setup_complete_handler_stubs(monkeypatch, data_sources, *, baseline_nonempty):
+    """Shared stubs for browser_sync_job_complete handler tests.
+
+    Returns a dict capturing whether success/failed were invoked and with what args.
+    """
+    from contextlib import nullcontext
+
+    job_row = {
+        "id": "sync-empty",
+        "company_id": "c1",
+        "data_source_id": "s1",
+        "resource_key": "browser-collection-bill-details@1",
+        "job_status": "running",
+        "request_payload": {
+            "dataset_id": "d1",
+            "dataset_code": "bill_details",
+            "biz_date": "2026-06-24",
+        },
+    }
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(data_sources, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(
+        data_sources.auth_db, "get_unified_sync_job_by_id", lambda sync_job_id: dict(job_row)
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db, "browser_sync_job_transition_lock", lambda sync_job_id: nullcontext()
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "guard_browser_sync_job_worker_active",
+        lambda **kw: dict(job_row),
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda *, company_id, data_source_id: {"shop_id": "shop-001", "playbook_id": "bill-details"},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "has_recent_nonempty_browser_collection",
+        lambda **kw: bool(baseline_nonempty),
+    )
+
+    def fake_success(**kw):
+        calls["success"] = kw
+        return {"id": kw["sync_job_id"], "job_status": "success", "completed_at": "2026-06-25T12:00:00+08:00"}
+
+    def fake_failed(**kw):
+        calls["failed"] = kw
+        return {"id": kw["sync_job_id"], "job_status": "pending"}
+
+    monkeypatch.setattr(data_sources.auth_db, "mark_browser_sync_job_success", fake_success)
+    monkeypatch.setattr(data_sources.auth_db, "mark_browser_sync_job_failed", fake_failed)
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "update_unified_data_source_dataset_health",
+        lambda **kw: {"id": kw.get("dataset_id")},
+    )
+    monkeypatch.setattr(
+        data_sources.auth_db,
+        "cancel_open_handoff_sessions_for_sync_job",
+        lambda **kw: 0,
+    )
+    return calls
+
+
+def test_browser_sync_job_complete_empty_with_baseline_defers_instead_of_success(monkeypatch) -> None:
+    import asyncio
+
+    data_sources = _import_mcp_data_sources()
+    calls = _setup_complete_handler_stubs(monkeypatch, data_sources, baseline_nonempty=True)
+
+    asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_complete",
+            {
+                "worker_token": "tok",
+                "sync_job_id": "sync-empty",
+                "summary": {"quality_summary": {"row_count": 0}},
+                "records": [],
+                "capture_files": [],
+            },
+        )
+    )
+
+    # An empty scrape for a dataset that normally has rows must NOT become a reusable success.
+    assert "success" not in calls
+    assert "failed" in calls
+    assert calls["failed"]["fail_reason"] == "EMPTY_RESULT"
+    assert calls["failed"]["retryable"] is True
+
+
+def test_browser_sync_job_complete_empty_without_baseline_marks_success(monkeypatch) -> None:
+    import asyncio
+
+    data_sources = _import_mcp_data_sources()
+    calls = _setup_complete_handler_stubs(monkeypatch, data_sources, baseline_nonempty=False)
+
+    asyncio.run(
+        data_sources.handle_tool_call(
+            "browser_sync_job_complete",
+            {
+                "worker_token": "tok",
+                "sync_job_id": "sync-empty",
+                "summary": {"quality_summary": {"row_count": 0}},
+                "records": [],
+                "capture_files": [],
+            },
+        )
+    )
+
+    # Genuinely-empty datasets (no recent non-empty baseline) keep the existing success behavior.
+    assert "failed" not in calls
+    assert "success" in calls
+
+
+def _fake_conn_returning(fetchone_value, captured):
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+
+        def fetchone(self):
+            return fetchone_value
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor()
+
+    class _ConnManager:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    return _ConnManager()
+
+
+def test_has_recent_nonempty_browser_collection_true_when_row_found(monkeypatch) -> None:
+    from auth import db as auth_db
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _fake_conn_returning((1,), captured))
+
+    result = auth_db.has_recent_nonempty_browser_collection(
+        company_id="c1",
+        data_source_id="s1",
+        dataset_id="d1",
+        resource_key="rk1",
+        before_biz_date="2026-06-24",
+        lookback_days=14,
+    )
+
+    assert result is True
+    assert "biz_date < %s" in captured["sql"]
+    assert "record_status <> 'deleted'" in captured["sql"]
+    # resource_key constraint applied when provided
+    assert "resource_key = %s" in captured["sql"]
+
+
+def test_has_recent_nonempty_browser_collection_false_when_no_row(monkeypatch) -> None:
+    from auth import db as auth_db
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(auth_db, "get_conn", lambda: _fake_conn_returning(None, captured))
+
+    result = auth_db.has_recent_nonempty_browser_collection(
+        company_id="c1",
+        data_source_id="s1",
+        dataset_id="d1",
+        before_biz_date="2026-06-24",
+    )
+
+    assert result is False
+
+
+def test_has_recent_nonempty_browser_collection_short_circuits_without_db(monkeypatch) -> None:
+    from auth import db as auth_db
+
+    def _boom():
+        raise AssertionError("get_conn must not be called when required args are missing")
+
+    monkeypatch.setattr(auth_db, "get_conn", _boom)
+
+    assert (
+        auth_db.has_recent_nonempty_browser_collection(
+            company_id="c1",
+            data_source_id="s1",
+            dataset_id="",
+            before_biz_date="2026-06-24",
+        )
+        is False
+    )
+
+
 def test_browser_sync_job_complete_auto_activates_verification_playbook(monkeypatch) -> None:
     import asyncio
     from contextlib import nullcontext

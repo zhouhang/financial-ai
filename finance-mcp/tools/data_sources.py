@@ -10713,6 +10713,50 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
             "records": record_summary,
             "capture_file_count": int(file_summary.get("inserted_count") or 0),
         }
+
+        # Empty-result guard: a browser scrape that ingested 0 rows for a dataset that
+        # normally has rows must NOT be recorded as a (reusable) success. The platform
+        # sometimes posts the settlement/bill data late; an early empty scrape would
+        # otherwise be cached as the authoritative result for the biz_date and feed an
+        # empty side into reconciliation (turning every order into a false diff). Defer
+        # via a retryable failure so the job re-runs later; a custom EMPTY_RESULT reason
+        # leaves the shop binding healthy (no handoff, no pause). Datasets that are
+        # genuinely empty (no recent non-empty baseline) keep the normal success path.
+        ingested_count = int(
+            record_summary.get("record_count")
+            or record_summary.get("upserted_count")
+            or 0
+        )
+        if (
+            ingested_count == 0
+            and not capture_files
+            and dataset_id
+            and biz_date
+            and auth_db.has_recent_nonempty_browser_collection(
+                company_id=company_id,
+                data_source_id=data_source_id,
+                dataset_id=dataset_id,
+                resource_key=resource_key,
+                before_biz_date=biz_date,
+                lookback_days=14,
+            )
+        ):
+            deferred = auth_db.mark_browser_sync_job_failed(
+                sync_job_id=sync_job_id,
+                error_message="采集结果为空但近 14 天有非空采集，疑似平台数据未就绪，稍后重试",
+                fail_reason="EMPTY_RESULT",
+                retryable=True,
+                retry_delay_seconds=1200,
+                allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
+            )
+            return {
+                "success": True,
+                "deferred_empty_result": True,
+                "job": _attach_aliases_to_job(deferred) if deferred else None,
+                "summary": final_summary,
+                "message": "采集结果为空但该数据集近期有数据，已按疑似数据未就绪重试，不计为成功",
+            }
+
         row = auth_db.mark_browser_sync_job_success(
             sync_job_id=sync_job_id,
             summary=final_summary,
