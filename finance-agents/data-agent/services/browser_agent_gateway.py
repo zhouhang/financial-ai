@@ -184,6 +184,8 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
         "agent_id": conn.agent_id, "profile_key": str(msg.get("shop_id") or ""),
         "reason": str(msg.get("reason") or "RISK_VERIFICATION"),
         "data_source_id": (msg.get("data_source_id") or None),
+        # 链接 TTL 与采集机人工等待窗口对齐(45min),否则窗口未到链接先失效→重开提示"采集机暂未连接"
+        "expires_in_seconds": 2700,
     })
     if not created.get("success"):
         return {"type": "result", "id": req_id, "ok": False, "error": str(created.get("error") or "create session failed")}

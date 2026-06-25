@@ -139,7 +139,7 @@ class PlaywrightRunConfig:
     click_delay_min_ms: int = 800
     click_delay_max_ms: int = 1800
     type_delay_ms: int = 160
-    risk_manual_timeout_ms: int = 900000
+    risk_manual_timeout_ms: int = 2700000  # 45 分钟,给人工远程接管验证留足时间(与 handoff 链接 TTL 对齐)
 
     @classmethod
     def from_env(cls) -> "PlaywrightRunConfig":
@@ -159,7 +159,7 @@ class PlaywrightRunConfig:
             click_delay_min_ms=_env_int("BROWSER_AGENT_CLICK_DELAY_MIN_MS", 800),
             click_delay_max_ms=_env_int("BROWSER_AGENT_CLICK_DELAY_MAX_MS", 1800),
             type_delay_ms=_env_int("BROWSER_AGENT_TYPE_DELAY_MS", 160),
-            risk_manual_timeout_ms=_env_int("BROWSER_AGENT_RISK_MANUAL_TIMEOUT_MS", 900000),
+            risk_manual_timeout_ms=_env_int("BROWSER_AGENT_RISK_MANUAL_TIMEOUT_MS", 2700000),
         )
 
 
@@ -1342,6 +1342,39 @@ def _run_async_safely(coro: Any, *, event_loop: Any = None) -> None:
         logger.exception("handoff async callback failed")
 
 
+def _emit_focus_state_if_changed(
+    backend: Any,
+    *,
+    coordinator: Any,
+    sync_job_id: str,
+    last_focus_editable: bool | None,
+    handoff_event_loop: Any,
+) -> bool | None:
+    """上报远程焦点是否落在可编辑框,只在变化时发送(操作端据此点亮"发送"按钮)。
+
+    这条 handoff_focus_state 由 data-agent 转发为 focus_state;前端缺它则"发送"永久置灰。
+    本循环是人工验证的生命线,任何异常都不能让它崩溃,因此整体兜底。
+    """
+    focus_fn = getattr(backend, "current_focus_editable", None)
+    if not callable(focus_fn):
+        return last_focus_editable
+    try:
+        focus_now = focus_fn()
+    except Exception:
+        return last_focus_editable
+    if focus_now is None or focus_now == last_focus_editable:
+        return last_focus_editable
+    _run_async_safely(
+        coordinator.emit_focus_state(
+            sync_job_id=sync_job_id,
+            backend=backend,
+            editable=bool(focus_now),
+        ),
+        event_loop=handoff_event_loop,
+    )
+    return focus_now
+
+
 def _risk_cleared(contexts: list[Any]) -> bool:
     return _blocking_states_cleared(contexts, {"RISK_VERIFICATION"})
 
@@ -1391,6 +1424,7 @@ def _wait_for_risk_to_clear_with_handoff(
         )
     coordinator.register_backend(sync_job_id=sync_job_id, backend=backend)
     deadline = time.monotonic() + (max(1, timeout_ms) / 1000)
+    last_focus_editable: bool | None = None
     try:
         while time.monotonic() <= deadline:
             backend.drain_pending_input()
@@ -1400,6 +1434,13 @@ def _wait_for_risk_to_clear_with_handoff(
                     backend=backend,
                     frame=backend.capture_frame(),
                 ), event_loop=handoff_event_loop)
+            last_focus_editable = _emit_focus_state_if_changed(
+                backend,
+                coordinator=coordinator,
+                sync_job_id=sync_job_id,
+                last_focus_editable=last_focus_editable,
+                handoff_event_loop=handoff_event_loop,
+            )
             if _blocking_states_cleared(contexts, blocking):
                 _run_async_safely(coordinator.emit_status({
                     "type": "handoff_completed",

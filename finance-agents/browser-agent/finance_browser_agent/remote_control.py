@@ -32,6 +32,9 @@ class RemoteControlBackend(Protocol):
     def should_capture_frame(self) -> bool: ...
     def capture_frame(self) -> dict[str, Any]: ...
 
+    # 焦点上报:返回当前焦点元素是否可编辑(None=未知),用于点亮操作端"发送"按钮
+    def current_focus_editable(self) -> bool | None: ...
+
     # 输入注入
     def inject_mouse(self, event: dict[str, Any]) -> None: ...
     def inject_key(self, event: dict[str, Any]) -> None: ...
@@ -130,6 +133,21 @@ class PlaywrightControlBackend:
 
     def teardown(self) -> None:
         self.stop_stream()
+
+    def current_focus_editable(self) -> bool | None:
+        try:
+            return bool(self.page.evaluate(
+                """
+                () => {
+                  const el = document.activeElement;
+                  if (!el) return false;
+                  const tag = String(el.tagName || '').toLowerCase();
+                  return tag === 'input' || tag === 'textarea' || el.isContentEditable === true;
+                }
+                """
+            ))
+        except Exception:
+            return None
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -244,6 +262,15 @@ class RemoteControlCoordinator:
             "handoff_session_id": backend.handoff_session_id,
             "controller_id": backend.controller_id,
             **frame,
+        })
+
+    async def emit_focus_state(self, *, sync_job_id: str, backend: RemoteControlBackend, editable: bool) -> None:
+        await self._send_event({
+            "type": "handoff_focus_state",
+            "sync_job_id": str(sync_job_id),
+            "handoff_session_id": backend.handoff_session_id,
+            "controller_id": backend.controller_id,
+            "editable": bool(editable),
         })
 
     async def emit_status(self, payload: dict[str, Any]) -> None:
