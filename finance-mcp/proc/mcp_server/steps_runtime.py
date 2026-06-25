@@ -3140,14 +3140,16 @@ def _evaluate_formula_ast(node: ast.AST, env: dict[str, Any]) -> Any:
         if isinstance(node.op, ast.Add):
             return left + right
         if isinstance(node.op, ast.Sub):
-            left_num, right_num = _require_formula_numeric_operands(left, right, "-")
-            return left_num - right_num
+            operands = _coerce_formula_numeric_operands(left, right)
+            return None if operands is None else operands[0] - operands[1]
         if isinstance(node.op, ast.Mult):
-            left_num, right_num = _require_formula_numeric_operands(left, right, "*")
-            return left_num * right_num
+            operands = _coerce_formula_numeric_operands(left, right)
+            return None if operands is None else operands[0] * operands[1]
         if isinstance(node.op, ast.Div):
-            left_num, right_num = _require_formula_numeric_operands(left, right, "/")
-            return left_num / right_num
+            operands = _coerce_formula_numeric_operands(left, right)
+            if operands is None:
+                return None
+            return operands[0] / operands[1] if operands[1] != 0 else None
         raise ProcRuleConfigError(
             summary="规则配置有误",
             cause=f"不支持的算术运算: {type(node.op).__name__}",
@@ -3233,20 +3235,6 @@ def _coerce_formula_numeric_operands(left: Any, right: Any) -> Optional[tuple[fl
     if left_num is None or right_num is None:
         return None
     return left_num, right_num
-
-
-def _require_formula_numeric_operands(left: Any, right: Any, operator: str) -> tuple[float, float]:
-    operands = _coerce_formula_numeric_operands(left, right)
-    if operands is None:
-        raise ProcRuleConfigError(
-            summary="规则配置有误",
-            cause=(
-                f"公式算术运算 {operator} 需要数值，实际为 "
-                f"{type(left).__name__}({left!r}) 和 {type(right).__name__}({right!r})"
-            ),
-            suggestion="这是规则配置问题，请联系管理员核对规则后重试。",
-        )
-    return operands
 
 
 def _coerce_formula_number(value: Any) -> Optional[float]:

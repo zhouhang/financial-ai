@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime
 from typing import Any, Optional
@@ -9,6 +10,8 @@ from typing import Any, Optional
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 import jwt
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 from graphs.recon.auto_run_service import (
     append_execution_run_retry_history,
@@ -1931,13 +1934,33 @@ async def execute_run_plan(
 
 
 @router.post("/diff-digestion-sweep")
+async def _run_diff_digestion_sweep_background(company_id: str, since_date: str) -> None:
+    """后台执行回填消化扫描;响应已返回,只能记日志不能抛错。"""
+    try:
+        result = await sweep_diff_digestion(company_id=company_id, since_date=since_date)
+        if result.get("success"):
+            logger.info(
+                "[diff_digestion_sweep] 后台完成 company=%s since=%s scanned=%s enqueued=%s skipped=%s",
+                company_id, since_date, result.get("scanned"), result.get("enqueued"), result.get("skipped"),
+            )
+        else:
+            logger.warning(
+                "[diff_digestion_sweep] 后台失败 company=%s since=%s error=%s",
+                company_id, since_date, result.get("error"),
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("[diff_digestion_sweep] 后台异常 company=%s since=%s", company_id, since_date)
+
+
 async def diff_digestion_sweep(
     body: DiffDigestionSweepRequest,
+    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(None),
 ):
     """回填消化扫描:对 since_date 起仍有 open 差异的历史 run 逐个入队 resolve 重判。
 
-    供 finance-cron 凌晨定时调用,按 token 的 company 限定范围。
+    供 finance-cron 凌晨定时调用,按 token 的 company 限定范围。扫描可能耗时数十分钟
+    (逐 run 去重+入队),放后台跑、立即返回,避免调用方 HTTP 超时误报失败。
     """
     auth_token = _extract_auth_token(authorization)
     if not auth_token:
@@ -1948,13 +1971,14 @@ async def diff_digestion_sweep(
     since_date = str(body.since_date or "").strip()
     if not since_date:
         raise HTTPException(status_code=400, detail="since_date 不能为空")
-    result = await sweep_diff_digestion(
-        company_id=str(user["company_id"]),
-        since_date=since_date,
-    )
-    if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("error", "回填消化扫描失败"))
-    return result
+    company_id = str(user["company_id"])
+    background_tasks.add_task(_run_diff_digestion_sweep_background, company_id, since_date)
+    return {
+        "started": True,
+        "company_id": company_id,
+        "since_date": since_date,
+        "message": "回填消化扫描已在后台启动",
+    }
 
 
 @router.post("/auto-runs")
