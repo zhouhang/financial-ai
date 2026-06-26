@@ -131,7 +131,7 @@ describe('HandoffPage', () => {
     expect(screen.queryByPlaceholderText('短信验证码或文本')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '打开键盘输入' }));
     fireEvent.change(screen.getByPlaceholderText('短信验证码或文本'), { target: { value: '123456' } });
-    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    fireEvent.click(screen.getByRole('button', { name: '填入' }));
     fireEvent.click(screen.getByRole('button', { name: '我已完成验证' }));
 
     const sent = ws.sent.map((item) => JSON.parse(item));

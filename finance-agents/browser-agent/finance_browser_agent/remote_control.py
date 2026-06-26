@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import queue
 import threading
 import time
@@ -9,6 +10,21 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
 
 logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, ""))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, ""))
+    except (TypeError, ValueError):
+        return default
 
 
 class RemoteControlBackend(Protocol):
@@ -63,6 +79,23 @@ class PlaywrightControlBackend:
     _interactive_until: float = 0.0
     _resume_check_requested: bool = False
     _input_queue: queue.Queue[dict[str, Any]] = field(default_factory=queue.Queue)
+    _cdp_sess: Any = None
+    # 抓帧降采样:在 Chrome 内按 scale 缩放后再编码 JPEG,直接减小过 WS 的字节数(治"卡")。
+    # 都可用环境变量调:FRAME_SCALE 缩放比(0~1)、FRAME_QUALITY JPEG 质量(1~100)。
+    _frame_scale: float = field(default_factory=lambda: min(1.0, _env_float("BROWSER_AGENT_HANDOFF_FRAME_SCALE", 0.6)))
+    _frame_quality: int = field(default_factory=lambda: _env_int("BROWSER_AGENT_HANDOFF_FRAME_QUALITY", 50))
+
+    def _cdp(self) -> Any:
+        if self._cdp_sess is not None:
+            return self._cdp_sess
+        try:
+            context = getattr(self.page, "context", None)
+            new_cdp_session = getattr(context, "new_cdp_session", None)
+            if callable(new_cdp_session):
+                self._cdp_sess = new_cdp_session(self.page)
+        except Exception:
+            self._cdp_sess = None
+        return self._cdp_sess
 
     def start_stream(
         self,
@@ -94,10 +127,14 @@ class PlaywrightControlBackend:
             if kind == "__resume_check__":
                 self._resume_check_requested = True
                 continue
-            event_controller = str(event.get("controller_id") or "")
-            if event_controller and self.controller_id and event_controller != self.controller_id:
-                logger.warning("丢弃非当前 controller 的 input: got=%s active=%s", event_controller, self.controller_id)
-                continue
+            # 只认 handoff_session(事件已按 sync_job_id 路由到本 backend);不再按 controller_id 拦截。
+            # 旧逻辑下手机端关闭重开会换 controller_id,导致新点击被静默丢弃(同一 session 同一时刻只有
+            # 一个有效 controller,云端 open_controller 已撤销旧的)。
+            if kind not in ("mouse_move", "wheel"):
+                logger.info(
+                    "handoff input applied: kind=%s controller=%s session=%s",
+                    kind, str(event.get("controller_id") or ""), self.handoff_session_id,
+                )
             self.apply_input_event(event)
 
     def pop_resume_check_requested(self) -> bool:
@@ -106,13 +143,39 @@ class PlaywrightControlBackend:
         return requested
 
     def capture_frame(self) -> dict[str, Any]:
-        viewport = getattr(self.page, "viewport_size", None) or {}
-        raw = self.page.screenshot(type="jpeg", quality=60, full_page=False)
         self._last_frame_at = time.monotonic()
+        viewport = getattr(self.page, "viewport_size", None) or {}
+        vw = int(viewport.get("width") or 0)
+        vh = int(viewport.get("height") or 0)
+        scale = self._frame_scale
+        cdp = self._cdp()
+        # 首选 CDP Page.captureScreenshot 带 clip.scale:缩放在 Chrome 内完成,过 WS 的图直接变小。
+        if cdp is not None and vw > 0 and vh > 0 and 0 < scale < 1:
+            try:
+                shot = cdp.send(
+                    "Page.captureScreenshot",
+                    {
+                        "format": "jpeg",
+                        "quality": self._frame_quality,
+                        "clip": {"x": 0, "y": 0, "width": vw, "height": vh, "scale": scale},
+                    },
+                )
+                data = str(shot.get("data") or "")
+                if data:
+                    return {
+                        "mime": "image/jpeg",
+                        "width": int(vw * scale),
+                        "height": int(vh * scale),
+                        "data": data,
+                    }
+            except Exception:
+                logger.debug("handoff CDP 缩放抓帧失败,回退整帧", exc_info=True)
+        # 回退:Playwright 整帧截图(不缩放)
+        raw = self.page.screenshot(type="jpeg", quality=self._frame_quality, full_page=False)
         return {
             "mime": "image/jpeg",
-            "width": int(viewport.get("width") or 0),
-            "height": int(viewport.get("height") or 0),
+            "width": vw,
+            "height": vh,
             "data": base64.b64encode(raw).decode("ascii"),
         }
 
@@ -224,8 +287,15 @@ class RemoteControlCoordinator:
             backend = self._backends_by_sync_job.get(sync_job_id)
             if backend is None and event == "handoff_start":
                 self._pending_starts[sync_job_id] = dict(msg)
+                logger.info("handoff_start 暂存(backend 未就绪): sync_job_id=%s", sync_job_id)
                 return
         if backend is None:
+            input_kind = str((msg.get("input") or {}).get("kind") or "")
+            if input_kind not in ("mouse_move", "wheel"):
+                logger.warning(
+                    "handoff 事件无匹配 backend(链接可能指向已结束/重试的任务): event=%s sync_job_id=%s",
+                    event, sync_job_id,
+                )
             return
         if event == "handoff_start":
             self._start_backend(backend, msg)

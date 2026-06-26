@@ -140,7 +140,7 @@ export default function HandoffPage() {
                   disabled={!canSendText({ text, disabled, focusEditable })}
                   className="h-11 shrink-0 rounded-md bg-neutral-950 px-4 text-sm font-semibold text-white disabled:opacity-40"
                 >
-                  发送
+                  填入
                 </button>
               </div>
               {focusEditable === false ? (

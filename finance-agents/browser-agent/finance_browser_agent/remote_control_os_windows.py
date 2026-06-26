@@ -771,12 +771,18 @@ class WindowsControlBackend:
                 event = self._input_queue.get_nowait()
             except queue.Empty:
                 return
-            if str(event.get("kind") or "") == "__resume_check__":
+            kind = str(event.get("kind") or "")
+            if kind == "__resume_check__":
                 self._resume_check_requested = True
                 continue
-            ec = str(event.get("controller_id") or "")
-            if ec and self.controller_id and ec != self.controller_id:
-                continue
+            # 只认 handoff_session(事件已按 sync_job_id 路由到本 backend);不再按 controller_id 拦截。
+            # 旧逻辑下手机端关闭重开会换 controller_id,导致新点击被静默丢弃(同一 session 同一时刻只有
+            # 一个有效 controller,云端 open_controller 已撤销旧的)。
+            if kind not in ("mouse_move", "wheel"):
+                logger.info(
+                    "handoff input applied: kind=%s controller=%s session=%s",
+                    kind, str(event.get("controller_id") or ""), self.handoff_session_id,
+                )
             self.apply_input_event(event)
 
     def pop_resume_check_requested(self) -> bool:
