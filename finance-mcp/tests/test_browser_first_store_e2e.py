@@ -270,7 +270,7 @@ def test_e2e_waiting_data_failed_browser_job_fast_fails(monkeypatch) -> None:
 
     sql = "\n".join(cursor.executed)
     assert "status = 'failed'" in sql
-    assert "s.job_status = 'failed'" in sql
+    assert "s.job_status IN ('failed', 'cancelled')" in sql
     assert "s.error_message" in sql
     assert "UPDATE execution_runs" in sql
 

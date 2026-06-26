@@ -145,6 +145,23 @@ DATASET_CANDIDATE_BATCH_SIZE = 200
 DATASET_CANDIDATE_MAX_SCAN_PAGES = 200
 _SEMANTIC_ENV_CACHE: dict[str, str] | None = None
 TAOBAO_TZ = timezone(timedelta(hours=8))
+
+# 空采集"未就绪重试"配置：仅在近 EMPTY_RETRY_RECENT_LOOKBACK_DAYS 天有数据时，
+# 按 EMPTY_RETRY_DELAY_SECONDS 间隔重试到当日 EMPTY_RETRY_CUTOFF_HHMM；过点仍空则按空成功收尾。
+EMPTY_RETRY_CUTOFF_HHMM = os.getenv("BROWSER_EMPTY_RETRY_CUTOFF_HHMM", "18:30")
+EMPTY_RETRY_RECENT_LOOKBACK_DAYS = int(os.getenv("BROWSER_EMPTY_RETRY_LOOKBACK_DAYS", "3"))
+EMPTY_RETRY_DELAY_SECONDS = int(os.getenv("BROWSER_EMPTY_RETRY_DELAY_SECONDS", "3600"))
+EMPTY_RETRY_MAX_ATTEMPTS = int(os.getenv("BROWSER_EMPTY_RETRY_MAX_ATTEMPTS", "24"))
+
+
+def _empty_retry_cutoff_passed(now: datetime | None = None) -> bool:
+    """当前（UTC+8）是否已到/过当日空采集重试 cutoff（默认 18:30）。"""
+    now_local = (now or datetime.now(timezone.utc)).astimezone(TAOBAO_TZ)
+    hh, mm = (int(x) for x in EMPTY_RETRY_CUTOFF_HHMM.split(":"))
+    cutoff = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    return now_local >= cutoff
+
+
 PLATFORM_TOKEN_REFRESH_THRESHOLD = timedelta(minutes=30)
 
 
@@ -10734,6 +10751,13 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
         ingested_count = int(
             record_summary.get("record_count")
             or record_summary.get("upserted_count")
+            or record_summary.get("input_count")
+            or (
+                int(record_summary.get("inserted_count") or 0)
+                + int(record_summary.get("updated_count") or 0)
+                + int(record_summary.get("unchanged_count") or 0)
+            )
+            or len(records)
             or 0
         )
         if (
@@ -10747,15 +10771,20 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
                 dataset_id=dataset_id,
                 resource_key=resource_key,
                 before_biz_date=biz_date,
-                lookback_days=14,
+                lookback_days=EMPTY_RETRY_RECENT_LOOKBACK_DAYS,
             )
+            and not _empty_retry_cutoff_passed()
         ):
             deferred = auth_db.mark_browser_sync_job_failed(
                 sync_job_id=sync_job_id,
-                error_message="采集结果为空但近 14 天有非空采集，疑似平台数据未就绪，稍后重试",
+                error_message=(
+                    f"采集结果为空但近 {EMPTY_RETRY_RECENT_LOOKBACK_DAYS} 天有非空采集，"
+                    f"疑似平台账单未生成，按小时重试至当日 {EMPTY_RETRY_CUTOFF_HHMM}"
+                ),
                 fail_reason="EMPTY_RESULT",
                 retryable=True,
-                retry_delay_seconds=1200,
+                retry_delay_seconds=EMPTY_RETRY_DELAY_SECONDS,
+                max_attempts=EMPTY_RETRY_MAX_ATTEMPTS,
                 allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
             )
             return {
@@ -10763,8 +10792,14 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
                 "deferred_empty_result": True,
                 "job": _attach_aliases_to_job(deferred) if deferred else None,
                 "summary": final_summary,
-                "message": "采集结果为空但该数据集近期有数据，已按疑似数据未就绪重试，不计为成功",
+                "message": (
+                    f"采集为空且近 {EMPTY_RETRY_RECENT_LOOKBACK_DAYS} 天有数据，"
+                    f"按小时重试至 {EMPTY_RETRY_CUTOFF_HHMM}，不计为成功"
+                ),
             }
+        # 近 N 天无数据，或已过当日 cutoff：认定确实无数据，落到下方既有 success 路径
+        # （mark_browser_sync_job_success 会写 checkpoint_after.browser_collection_summary count=0，
+        #  对账 loader 据此返回空 DataFrame 放行，无需额外改动）
 
         row = auth_db.mark_browser_sync_job_success(
             sync_job_id=sync_job_id,

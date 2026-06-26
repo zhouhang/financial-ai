@@ -2638,3 +2638,95 @@ def test_dispatcher_persists_oss_capture_metadata() -> None:
     capture = fake_db.capture_files[0]["capture_files"][0]
     assert capture["storage_provider"] == "oss"
     assert capture["storage_key"] == "browser-captures/c1/qn.csv"
+
+
+# ── Empty-result retry: cutoff helper ────────────────────────────────────────
+
+
+def test_empty_retry_cutoff_passed_boundary() -> None:
+    ds = _import_mcp_data_sources()
+    tz8 = timezone(timedelta(hours=8))
+    before = datetime(2026, 6, 26, 18, 29, tzinfo=tz8).astimezone(timezone.utc)
+    after = datetime(2026, 6, 26, 18, 31, tzinfo=tz8).astimezone(timezone.utc)
+    assert ds._empty_retry_cutoff_passed(before) is False
+    assert ds._empty_retry_cutoff_passed(after) is True
+
+
+# ── Empty-result retry: handler routing ──────────────────────────────────────
+
+
+def _run_complete_empty(monkeypatch, *, recent: bool, cutoff_passed: bool) -> dict:
+    import asyncio
+    from contextlib import nullcontext
+
+    ds = _import_mcp_data_sources()
+
+    fake_job = {
+        "id": "j",
+        "company_id": "c",
+        "data_source_id": "d",
+        "resource_key": "rk",
+        "job_status": "running",
+        "is_verification": False,
+        "request_payload": {
+            "dataset_id": "ds_id",
+            "biz_date": "2026-06-25",
+        },
+    }
+
+    calls: dict[str, Any] = {"failed": None, "success": None}
+
+    monkeypatch.setattr(ds, "_require_scheduler_user", lambda token: {"role": "system"})
+    monkeypatch.setattr(ds.auth_db, "browser_sync_job_transition_lock", lambda sid: nullcontext())
+    monkeypatch.setattr(ds.auth_db, "get_unified_sync_job_by_id", lambda sid: fake_job)
+    monkeypatch.setattr(ds.auth_db, "guard_browser_sync_job_worker_active", lambda **kw: fake_job)
+    monkeypatch.setattr(
+        ds.auth_db,
+        "get_shop_runtime_binding_for_source",
+        lambda **kw: {"shop_id": "s", "playbook_id": "p"},
+    )
+    monkeypatch.setattr(
+        ds.auth_db,
+        "has_recent_nonempty_browser_collection",
+        lambda **kw: recent,
+    )
+    monkeypatch.setattr(ds, "_empty_retry_cutoff_passed", lambda now=None: cutoff_passed)
+    monkeypatch.setattr(
+        ds.auth_db,
+        "mark_browser_sync_job_failed",
+        lambda **kw: calls.__setitem__("failed", kw) or {"id": "j", "job_status": "pending"},
+    )
+    monkeypatch.setattr(
+        ds.auth_db,
+        "mark_browser_sync_job_success",
+        lambda **kw: calls.__setitem__("success", kw) or {"id": "j", "job_status": "success"},
+    )
+    monkeypatch.setattr(ds.auth_db, "update_unified_data_source_dataset_health", lambda **kw: None)
+    monkeypatch.setattr(ds.auth_db, "cancel_open_handoff_sessions_for_sync_job", lambda **kw: None)
+    monkeypatch.setattr(ds, "_auto_finalize_browser_verification_job", lambda **kw: {})
+
+    asyncio.run(
+        ds._handle_browser_sync_job_complete(
+            {"sync_job_id": "j", "worker_token": "tok", "summary": {}}
+        )
+    )
+    return calls
+
+
+def test_empty_recent_before_cutoff_defers(monkeypatch) -> None:
+    calls = _run_complete_empty(monkeypatch, recent=True, cutoff_passed=False)
+    assert calls["failed"] is not None and calls["success"] is None
+    assert calls["failed"]["fail_reason"] == "EMPTY_RESULT"
+    assert calls["failed"]["retryable"] is True
+    ds = _import_mcp_data_sources()
+    assert calls["failed"]["retry_delay_seconds"] == ds.EMPTY_RETRY_DELAY_SECONDS
+
+
+def test_empty_recent_after_cutoff_succeeds(monkeypatch) -> None:
+    calls = _run_complete_empty(monkeypatch, recent=True, cutoff_passed=True)
+    assert calls["success"] is not None and calls["failed"] is None
+
+
+def test_empty_no_recent_succeeds(monkeypatch) -> None:
+    calls = _run_complete_empty(monkeypatch, recent=False, cutoff_passed=False)
+    assert calls["success"] is not None and calls["failed"] is None

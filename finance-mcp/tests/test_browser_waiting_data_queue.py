@@ -111,6 +111,19 @@ def test_fail_waiting_recon_runs_with_failed_browser_jobs_uses_collection_job_id
     assert "failed_stage = 'data_waiting'" in sql
 
 
+def test_fail_expired_waiting_exempts_empty_result_retry(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+
+    auth_db.fail_expired_waiting_recon_runs()
+
+    sql = "\n".join(cursor.sql)
+    assert "wait_deadline_at <= CURRENT_TIMESTAMP" in sql
+    assert "EMPTY_RESULT" in sql
+    assert "next_retry_at IS NOT NULL" in sql
+    assert "TIME '18:30'" in sql
+
+
 def test_success_collection_job_lookup_excludes_verification_jobs(monkeypatch) -> None:
     cursor = FakeCursor()
     monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))

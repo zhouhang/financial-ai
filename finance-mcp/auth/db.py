@@ -7285,6 +7285,20 @@ def fail_expired_waiting_recon_runs() -> int:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'waiting_data'
                       AND wait_deadline_at <= CURRENT_TIMESTAMP
+                      -- 豁免：所等浏览器采集仍在 EMPTY_RESULT 小时级重试中、且未过当日 18:30 cutoff，
+                      -- 视为"在等今天还没生成的账单"，不按 90 分钟死线误杀；其余一律维持快失败。
+                      AND NOT (
+                          CURRENT_TIMESTAMP < (CURRENT_DATE + TIME '18:30')
+                          AND jsonb_typeof(collection_job_ids) = 'array'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(collection_job_ids) jid
+                              JOIN sync_jobs s ON s.id::text = jid
+                              WHERE s.browser_fail_reason = 'EMPTY_RESULT'
+                                AND s.job_status = 'pending'
+                                AND s.next_retry_at IS NOT NULL
+                          )
+                      )
                     RETURNING id, company_id, COALESCE(NULLIF(waiting_reason, ''), '采集未就绪')
                     """
                 )
