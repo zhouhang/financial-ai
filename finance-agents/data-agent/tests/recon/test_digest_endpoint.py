@@ -66,6 +66,28 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def test_diff_digestion_sweep_route_accepts_json_body(client, monkeypatch) -> None:
+    """/diff-digestion-sweep 必须由 body 版处理器(token 取 company + body.since_date)接管。
+
+    回归 2026-06-26 线上 bug:@router.post 装饰器误装到后台 helper(company_id/since_date
+    走 query),导致 finance-cron 发 JSON body 被 422 拒绝,凌晨自动差异消化全部失败。
+    """
+    monkeypatch.setattr(
+        auto_run_api,
+        "sweep_diff_digestion",
+        AsyncMock(return_value={"success": True, "scanned": 0, "enqueued": 0, "skipped": 0}),
+    )
+    resp = client.post(
+        "/api/recon/diff-digestion-sweep",
+        headers={"Authorization": _auth_header()},
+        json={"since_date": "2026-06-11"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data.get("started") is True
+    assert data.get("since_date") == "2026-06-11"
+
+
 def _make_run(
     run_id: str = "run-abc",
     biz_date_in_run_context: str = "2026-06-01",
