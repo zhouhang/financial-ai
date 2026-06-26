@@ -1933,7 +1933,6 @@ async def execute_run_plan(
     return {"queued": True, "run_plan_code": run_plan_code, "job_id": str((result.get("job") or {}).get("id") or ""), "message": "对账任务已进入执行队列，请稍后查询运行结果"}
 
 
-@router.post("/diff-digestion-sweep")
 async def _run_diff_digestion_sweep_background(company_id: str, since_date: str) -> None:
     """后台执行回填消化扫描;响应已返回,只能记日志不能抛错。"""
     try:
@@ -1952,6 +1951,7 @@ async def _run_diff_digestion_sweep_background(company_id: str, since_date: str)
         logger.exception("[diff_digestion_sweep] 后台异常 company=%s since=%s", company_id, since_date)
 
 
+@router.post("/diff-digestion-sweep")
 async def diff_digestion_sweep(
     body: DiffDigestionSweepRequest,
     background_tasks: BackgroundTasks,
