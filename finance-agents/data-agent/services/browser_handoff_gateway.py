@@ -81,9 +81,13 @@ async def _send_handoff_start(agent: BrowserAgentPeer, controller: HandoffContro
         "event": "handoff_start",
         "handoff_session_id": controller.handoff_session_id,
         "controller_id": controller.controller_id,
-        "sync_job_id": str(controller.session.get("sync_job_id") or ""),
+        "sync_job_id": _controller_sync_job_id(controller),
         "frame_profile": {"idle_fps": 1, "interactive_fps": 5},
     })
+
+
+def _controller_sync_job_id(controller: HandoffController) -> str:
+    return str(controller.session.get("sync_job_id") or "")
 
 
 async def register_browser_agent(*, agent_id: str, token: str, send_event: SendJson) -> None:
@@ -222,6 +226,8 @@ async def open_controller(*, token: str, send_json: SendJson) -> HandoffControll
     })
     if latest:
         await send_json({"type": "frame", **latest})
+        if agent is not None:
+            await send_json({"type": "status", "status": "active"})
     if agent is None:
         await send_json({"type": "status", "status": "waiting_agent"})
         return controller
@@ -245,6 +251,7 @@ async def close_controller(controller: HandoffController) -> None:
         "event": "handoff_stop",
         "handoff_session_id": controller.handoff_session_id,
         "controller_id": controller.controller_id,
+        "sync_job_id": _controller_sync_job_id(controller),
     })
     await call_mcp_tool(
         "browser_handoff_session_event",
@@ -283,6 +290,7 @@ async def route_controller_message(controller: HandoffController, msg: dict[str,
             "event": "handoff_input",
             "handoff_session_id": controller.handoff_session_id,
             "controller_id": controller.controller_id,
+            "sync_job_id": _controller_sync_job_id(controller),
             "input": dict(msg.get("event") or {}),
         })
         return
@@ -302,6 +310,7 @@ async def route_controller_message(controller: HandoffController, msg: dict[str,
             "event": "handoff_resume_check",
             "handoff_session_id": controller.handoff_session_id,
             "controller_id": controller.controller_id,
+            "sync_job_id": _controller_sync_job_id(controller),
         })
         return
     if msg_type in {"client_hidden", "client_visible", "reconnect_stream"}:
@@ -310,6 +319,7 @@ async def route_controller_message(controller: HandoffController, msg: dict[str,
             "event": "handoff_frame_rate",
             "handoff_session_id": controller.handoff_session_id,
             "controller_id": controller.controller_id,
+            "sync_job_id": _controller_sync_job_id(controller),
             "profile": "idle" if msg_type == "client_hidden" else "interactive",
         })
         return

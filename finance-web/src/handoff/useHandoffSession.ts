@@ -136,7 +136,7 @@ export function useHandoffSession(token: string) {
     };
 
     ws.onclose = () => {
-      setStatus((current) => (TERMINAL_STATUSES.has(current) ? current : 'waiting_agent'));
+      setStatus((current) => (TERMINAL_STATUSES.has(current) ? current : 'connecting'));
     };
 
     return () => {

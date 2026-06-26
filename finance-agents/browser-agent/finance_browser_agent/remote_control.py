@@ -229,6 +229,7 @@ class RemoteControlCoordinator:
             return
         if event == "handoff_start":
             self._start_backend(backend, msg)
+            await self._emit_current_focus_state(sync_job_id=sync_job_id, backend=backend)
         elif event == "handoff_stop":
             backend.stop_stream()
         elif event == "handoff_input":
@@ -254,6 +255,24 @@ class RemoteControlCoordinator:
             idle_fps=float(frame_profile.get("idle_fps") or 1),
             interactive_fps=float(frame_profile.get("interactive_fps") or 5),
         )
+
+    async def _emit_current_focus_state(
+        self,
+        *,
+        sync_job_id: str,
+        backend: RemoteControlBackend,
+    ) -> None:
+        focus_fn = getattr(backend, "current_focus_editable", None)
+        if not callable(focus_fn):
+            return
+        try:
+            editable = focus_fn()
+        except Exception:
+            logger.exception("handoff current focus state failed")
+            return
+        if editable is None:
+            return
+        await self.emit_focus_state(sync_job_id=sync_job_id, backend=backend, editable=bool(editable))
 
     async def emit_frame(self, *, sync_job_id: str, backend: RemoteControlBackend, frame: dict[str, Any]) -> None:
         await self._send_event({

@@ -323,7 +323,7 @@ async def test_controller_input_and_resume_relay_to_agent(monkeypatch):
         handoff_session_id="h1",
         controller_id="ctrl-current",
         token="TKN",
-        session={"handoff_session_id": "h1", "agent_id": "agent-A"},
+        session={"handoff_session_id": "h1", "agent_id": "agent-A", "sync_job_id": "job-1"},
         send_json=controller_socket.send_json,
     )
     hg._controllers["h1"] = controller
@@ -335,8 +335,10 @@ async def test_controller_input_and_resume_relay_to_agent(monkeypatch):
     await hg.route_controller_message(controller, {"type": "resume_requested"})
 
     assert agent.sent[0]["event"] == "handoff_input"
+    assert agent.sent[0]["sync_job_id"] == "job-1"
     assert agent.sent[0]["input"]["kind"] == "click"
     assert agent.sent[1]["event"] == "handoff_resume_check"
+    assert agent.sent[1]["sync_job_id"] == "job-1"
     assert calls[-1] == (
         "browser_handoff_session_event",
         {
@@ -347,6 +349,97 @@ async def test_controller_input_and_resume_relay_to_agent(monkeypatch):
         },
     )
     assert any(msg["type"] == "status" and msg["status"] == "resuming" for msg in controller_socket.sent)
+
+
+@pytest.mark.asyncio
+async def test_controller_visibility_and_close_relay_include_sync_job_id(monkeypatch):
+    hg.reset_for_tests()
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_call(tool: str, args: dict):
+        calls.append((tool, args))
+        return {"success": True}
+
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+    agent = FakeAgent()
+    await hg.register_browser_agent(
+        agent_id="agent-A",
+        token="worker-token",
+        send_event=agent.send_event,
+    )
+    controller = hg.HandoffController(
+        handoff_session_id="h1",
+        controller_id="ctrl-current",
+        token="TKN",
+        session={"handoff_session_id": "h1", "agent_id": "agent-A", "sync_job_id": "job-1"},
+        send_json=FakeController().send_json,
+    )
+    hg._controllers["h1"] = controller
+
+    await hg.route_controller_message(controller, {"type": "client_hidden"})
+    await hg.route_controller_message(controller, {"type": "reconnect_stream"})
+    await hg.close_controller(controller)
+
+    assert agent.sent[0]["event"] == "handoff_frame_rate"
+    assert agent.sent[0]["sync_job_id"] == "job-1"
+    assert agent.sent[0]["profile"] == "idle"
+    assert agent.sent[1]["event"] == "handoff_frame_rate"
+    assert agent.sent[1]["sync_job_id"] == "job-1"
+    assert agent.sent[1]["profile"] == "interactive"
+    assert agent.sent[2]["event"] == "handoff_stop"
+    assert agent.sent[2]["sync_job_id"] == "job-1"
+
+
+@pytest.mark.asyncio
+async def test_controller_open_with_cached_frame_reports_active_for_current_controller(monkeypatch):
+    hg.reset_for_tests()
+
+    async def fake_call(tool: str, args: dict):
+        if tool == "browser_handoff_session_describe":
+            return {
+                "success": True,
+                "session": {
+                    "handoff_session_id": "h1",
+                    "sync_job_id": "job-1",
+                    "agent_id": "agent-A",
+                    "status": "active",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+            }
+        if tool == "browser_handoff_session_control_open":
+            return {
+                "success": True,
+                "session": {
+                    "handoff_session_id": "h1",
+                    "sync_job_id": "job-1",
+                    "agent_id": "agent-A",
+                    "status": "waiting_agent",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+            }
+        return {"success": True}
+
+    monkeypatch.setattr(hg, "call_mcp_tool", fake_call)
+    agent = FakeAgent()
+    await hg.register_browser_agent(
+        agent_id="agent-A",
+        token="worker-token",
+        send_event=agent.send_event,
+    )
+    hg._latest_frames["h1"] = {
+        "handoff_session_id": "h1",
+        "frame_id": 10,
+        "mime": "image/jpeg",
+        "width": 100,
+        "height": 80,
+        "data": "abc",
+    }
+    controller_socket = FakeController()
+
+    await hg.open_controller(token="TKN", send_json=controller_socket.send_json)
+
+    assert any(msg.get("type") == "frame" and msg.get("frame_id") == 10 for msg in controller_socket.sent)
+    assert any(msg.get("type") == "status" and msg.get("status") == "active" for msg in controller_socket.sent)
 
 
 @pytest.mark.asyncio

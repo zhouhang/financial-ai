@@ -138,4 +138,29 @@ describe('HandoffPage', () => {
     expect(sent).toContainEqual({ type: 'handoff_input', event: { kind: 'text', text: '123456' } });
     expect(sent).toContainEqual({ type: 'resume_requested' });
   });
+
+  it('does not show agent offline when only the controller websocket closes', async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    window.history.replaceState({}, '', '/handoff?t=TKN');
+
+    render(<HandoffPage />);
+    await waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const ws = FakeWebSocket.instances[0];
+    ws.feed({
+      type: 'session',
+      controller_id: 'ctrl-1',
+      status: 'active',
+      session: {
+        profile_key: '单枪旗舰店',
+        reason: 'RISK_VERIFICATION',
+        agent_id: 'browser-agent-win',
+      },
+    });
+    expect(await screen.findByText('可操作')).toBeInTheDocument();
+
+    ws.close();
+
+    expect(screen.queryByText('等待采集机')).not.toBeInTheDocument();
+    expect(await screen.findByText('连接中')).toBeInTheDocument();
+  });
 });
