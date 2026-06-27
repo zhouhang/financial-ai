@@ -159,6 +159,21 @@ def record_browser_alert_sent(dedupe_key: str, result: dict[str, Any]) -> None:
         logger.error("记录浏览器采集告警去重失败: %s", exc)
 
 
+def resolve_data_source_name(data_source_id: str) -> str:
+    """按 data_source_id 取中文采集源名称(handoff 告警店铺栏用)。失败返回空串。"""
+    if not str(data_source_id or "").strip():
+        return ""
+    try:
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM data_sources WHERE id = %s", (str(data_source_id),))
+                row = cur.fetchone()
+                return str(row[0]) if row and row[0] else ""
+    except Exception as exc:
+        logger.error("解析 data_source 名称失败: %s", exc)
+        return ""
+
+
 def collect_browser_alert_events(
     *,
     agent_grace_minutes: int = BROWSER_COLLECTION_ALERT_AGENT_GRACE_MINUTES,
@@ -297,16 +312,18 @@ def collect_browser_alert_events(
 
                 cur.execute(
                     """
-                    SELECT id, company_id, run_plan_code, biz_date, error
-                    FROM recon_execution_queue
-                    WHERE status = 'failed'
-                      AND finished_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+                    SELECT q.id, q.company_id, q.run_plan_code, q.biz_date, q.error,
+                           p.plan_name
+                    FROM recon_execution_queue q
+                    LEFT JOIN execution_run_plans p ON p.plan_code = q.run_plan_code
+                    WHERE q.status = 'failed'
+                      AND q.finished_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
                       AND (
-                          error ILIKE '%%浏览器采集%%'
-                          OR error ILIKE '%%采集未就绪%%'
-                          OR error ILIKE '%%browser%%'
+                          q.error ILIKE '%%浏览器采集%%'
+                          OR q.error ILIKE '%%采集未就绪%%'
+                          OR q.error ILIKE '%%browser%%'
                       )
-                    ORDER BY finished_at DESC
+                    ORDER BY q.finished_at DESC
                     LIMIT 100
                     """
                 )
@@ -316,7 +333,7 @@ def collect_browser_alert_events(
                             event_type="browser_recon_data_unavailable",
                             company_id=str(row.get("company_id") or ""),
                             shop_id=str(row.get("run_plan_code") or ""),
-                            data_source_name="自动对账任务",
+                            data_source_name=str(row.get("plan_name") or "自动对账任务"),
                             biz_date=str(row.get("biz_date") or ""),
                             sync_job_id=str(row.get("id") or ""),
                             severity="critical",
@@ -345,7 +362,8 @@ def _compose_alert_title(event: BrowserAlertEvent) -> str:
         "browser_collection_missed": "浏览器采集连续未成功",
         "browser_recon_data_unavailable": "浏览器数据未就绪导致对账失败",
     }.get(event.event_type, "浏览器采集告警")
-    shop = event.shop_id or event.agent_id or "unknown"
+    # 标题优先展示中文名(采集源/对账任务名),没有再退回 id/agent
+    shop = event.data_source_name or event.shop_id or event.agent_id or "unknown"
     return f"Tally {label}: {shop}"
 
 

@@ -90,19 +90,19 @@ def _handoff_reason_label(reason: str) -> str:
 
 
 def _notify_handoff_fallback(
-    *, company_id: str, sync_job_id: str, shop_id: str, reason: str, link: str
+    *, company_id: str, sync_job_id: str, shop_id: str, reason: str, link: str, data_source_id: str = ""
 ) -> bool:
     """没配责任人(或主通道未发出)时的兜底:直接复用浏览器采集告警发送方法,把验证链接
     发给 BROWSER_COLLECTION_ALERT_RECIPIENT_KEYWORD 解析出的接收人(不重写收件人解析/发送/去重)。"""
     try:
-        from services.browser_alerts import BrowserAlertEvent, BrowserAlertService
+        from services.browser_alerts import BrowserAlertEvent, BrowserAlertService, resolve_data_source_name
 
         result = BrowserAlertService().send_alert(
             BrowserAlertEvent(
                 event_type="risk_blocked",
                 company_id=company_id,
                 shop_id=shop_id,
-                data_source_name="",
+                data_source_name=resolve_data_source_name(data_source_id),
                 sync_job_id=sync_job_id,
                 reason=reason,
                 message=(
@@ -184,8 +184,9 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
         "agent_id": conn.agent_id, "profile_key": str(msg.get("shop_id") or ""),
         "reason": str(msg.get("reason") or "RISK_VERIFICATION"),
         "data_source_id": (msg.get("data_source_id") or None),
-        # 链接 TTL 与采集机人工等待窗口对齐(45min),否则窗口未到链接先失效→重开提示"采集机暂未连接"
-        "expires_in_seconds": 2700,
+        # 链接 TTL 须与采集机人工等待窗口(BROWSER_AGENT_RISK_MANUAL_TIMEOUT_MS)对齐,否则窗口未到
+        # 链接先失效→重开提示"采集机暂未连接"。默认 3h,可用 HANDOFF_LINK_TTL_SECONDS 调。
+        "expires_in_seconds": int(os.getenv("HANDOFF_LINK_TTL_SECONDS", "10800")),
     })
     if not created.get("success"):
         return {"type": "result", "id": req_id, "ok": False, "error": str(created.get("error") or "create session failed")}
@@ -210,6 +211,7 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
             shop_id=str(msg.get("shop_id") or ""),
             reason=reason,
             link=link,
+            data_source_id=str(msg.get("data_source_id") or ""),
         )
     elif recipient:
         # 配了责任人:走 per-company 通道。通道缺失/发送失败只记日志,不兜底(兜底仅针对"没配责任人")。
@@ -246,6 +248,7 @@ async def _handle_risk_waiting(conn: "BrowserAgentConnection", msg: dict) -> dic
             shop_id=str(msg.get("shop_id") or ""),
             reason=reason,
             link=link,
+            data_source_id=str(msg.get("data_source_id") or ""),
         )
     _NOTIFIED_RISK_JOBS.add(sync_job_id)
     return {"type": "result", "id": req_id, "ok": True,

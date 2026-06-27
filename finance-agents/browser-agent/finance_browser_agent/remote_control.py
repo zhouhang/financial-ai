@@ -97,6 +97,18 @@ class PlaywrightControlBackend:
             self._cdp_sess = None
         return self._cdp_sess
 
+    def _viewport(self) -> dict[str, int]:
+        # connect_over_cdp 接管的 page,page.viewport_size 常为 None → 退回真实布局视口
+        # (window.innerWidth/Height)。否则注入坐标全映射到 (0,0)、CDP 抓帧 clip 也失效。
+        vp = getattr(self.page, "viewport_size", None)
+        if vp and int(vp.get("width") or 0) > 0 and int(vp.get("height") or 0) > 0:
+            return {"width": int(vp["width"]), "height": int(vp["height"])}
+        try:
+            d = self.page.evaluate("() => ({width: window.innerWidth, height: window.innerHeight})")
+            return {"width": int(d.get("width") or 0), "height": int(d.get("height") or 0)}
+        except Exception:
+            return {"width": 0, "height": 0}
+
     def start_stream(
         self,
         *,
@@ -144,7 +156,7 @@ class PlaywrightControlBackend:
 
     def capture_frame(self) -> dict[str, Any]:
         self._last_frame_at = time.monotonic()
-        viewport = getattr(self.page, "viewport_size", None) or {}
+        viewport = self._viewport()
         vw = int(viewport.get("width") or 0)
         vh = int(viewport.get("height") or 0)
         scale = self._frame_scale
@@ -186,7 +198,7 @@ class PlaywrightControlBackend:
         return time.monotonic() - self._last_frame_at >= 1.0 / max(0.2, fps)
 
     def _point(self, event: dict[str, Any]) -> tuple[float, float]:
-        viewport = getattr(self.page, "viewport_size", None) or {"width": 0, "height": 0}
+        viewport = self._viewport()
         width = float(viewport.get("width") or 0)
         height = float(viewport.get("height") or 0)
         return float(event.get("x") or 0) * width, float(event.get("y") or 0) * height

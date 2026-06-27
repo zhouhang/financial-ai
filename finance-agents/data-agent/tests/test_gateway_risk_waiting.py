@@ -129,7 +129,7 @@ def test_risk_waiting_without_owner_falls_back_to_alert_recipient(monkeypatch):
     monkeypatch.setattr(gw, "get_notification_adapter", unexpected_adapter)
     monkeypatch.setattr(gw, "load_company_channel_config_by_id", unexpected_load_channel)
 
-    def fake_fallback(*, company_id, sync_job_id, shop_id, reason, link):
+    def fake_fallback(*, company_id, sync_job_id, shop_id, reason, link, data_source_id=""):
         calls["fallback"].append(
             {"company_id": company_id, "sync_job_id": sync_job_id,
              "shop_id": shop_id, "reason": reason, "link": link}
@@ -247,7 +247,7 @@ def test_force_alert_recipient_routes_handoff_to_zhouxing_even_with_owner(monkey
     monkeypatch.setattr(gw, "get_notification_adapter", unexpected_adapter)
     monkeypatch.setattr(gw, "load_company_channel_config_by_id", unexpected_load_channel)
 
-    def fake_fallback(*, company_id, sync_job_id, shop_id, reason, link):
+    def fake_fallback(*, company_id, sync_job_id, shop_id, reason, link, data_source_id=""):
         calls["fallback"].append({"sync_job_id": sync_job_id, "link": link})
         return True
 
