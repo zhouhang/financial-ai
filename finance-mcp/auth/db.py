@@ -7281,7 +7281,9 @@ def fail_expired_waiting_recon_runs() -> int:
                     UPDATE recon_execution_queue
                     SET status = 'failed',
                         finished_at = CURRENT_TIMESTAMP,
-                        error = COALESCE(NULLIF(waiting_reason, ''), '采集未就绪'),
+                        -- 死线超时:失败原因要写"超时未出数",不能沿用 waiting_reason(那是等待中的提示文案,
+                        -- 不是失败原因)。否则运行记录的"失败原因"列会显示"浏览器采集任务已创建,等待…"误导。
+                        error = '等待采集数据超时:截止前采集未出数(为空或未完成),本次对账未执行',
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'waiting_data'
                       AND wait_deadline_at <= CURRENT_TIMESTAMP
@@ -7299,7 +7301,7 @@ def fail_expired_waiting_recon_runs() -> int:
                                 AND s.next_retry_at IS NOT NULL
                           )
                       )
-                    RETURNING id, company_id, COALESCE(NULLIF(waiting_reason, ''), '采集未就绪')
+                    RETURNING id, company_id, '等待采集数据超时:截止前采集未出数(为空或未完成),本次对账未执行'
                     """
                 )
                 rows = cur.fetchall() or []
