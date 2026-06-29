@@ -7297,7 +7297,10 @@ def fail_expired_waiting_recon_runs() -> int:
                               FROM jsonb_array_elements_text(collection_job_ids) jid
                               JOIN sync_jobs s ON s.id::text = jid
                               WHERE s.browser_fail_reason = 'EMPTY_RESULT'
-                                AND s.job_status = 'pending'
+                                -- 放宽:重试任务被 claim 后会转 'running'(且不清 fail_reason/next_retry_at),
+                                -- 'queued' 同理是在途待跑;只认 'pending' 会在重试正跑的那一刻漏判豁免,
+                                -- 导致对账运行在 90 分钟死线被误杀。三者都视为"采集仍在小时级重试中"。
+                                AND s.job_status IN ('pending', 'queued', 'running')
                                 AND s.next_retry_at IS NOT NULL
                           )
                       )
