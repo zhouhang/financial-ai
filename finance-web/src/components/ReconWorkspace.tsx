@@ -767,11 +767,19 @@ function toSortableTimestamp(value: string): number {
   return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
-function buildRunListQuery(limit: number, offset: number, filters: { startedAtFrom: string; startedAtTo: string }): string {
+function buildRunListQuery(
+  limit: number,
+  offset: number,
+  filters: { keyword: string; startedAtFrom: string; startedAtTo: string },
+): string {
   const params = new URLSearchParams({
     limit: String(limit),
     offset: String(offset),
   });
+  const keyword = filters.keyword.trim();
+  if (keyword) {
+    params.set('keyword', keyword);
+  }
   if (filters.startedAtFrom) {
     params.set('started_at_from', filters.startedAtFrom);
   }
@@ -3124,6 +3132,7 @@ export default function ReconWorkspace({
   const [runsHasMore, setRunsHasMore] = useState(false);
   const [runsPageLoading, setRunsPageLoading] = useState(false);
   const [runsTotal, setRunsTotal] = useState(0);
+  const [runKeyword, setRunKeyword] = useState('');
   const [runStartedAtFrom, setRunStartedAtFrom] = useState('');
   const [runStartedAtTo, setRunStartedAtTo] = useState('');
   const [exceptionsByRunId, setExceptionsByRunId] = useState<Record<string, ReconRunExceptionDetail[]>>({});
@@ -3437,6 +3446,7 @@ export default function ReconWorkspace({
         fetchReconAutoApi(`/tasks?limit=${TASKS_PAGE_SIZE}&offset=0`, { headers }),
         fetchReconAutoApi(
           `/runs?${buildRunListQuery(RUNS_PAGE_SIZE, 0, {
+            keyword: '',
             startedAtFrom: '',
             startedAtTo: '',
           })}`,
@@ -3522,7 +3532,7 @@ export default function ReconWorkspace({
 
   const loadRunsPage = useCallback(async (
     nextPage: number,
-    filtersOverride?: { startedAtFrom: string; startedAtTo: string },
+    filtersOverride?: { keyword: string; startedAtFrom: string; startedAtTo: string },
   ): Promise<void> => {
     if (!authToken) return;
     const targetPage = Math.max(0, nextPage);
@@ -3531,6 +3541,7 @@ export default function ReconWorkspace({
       const headers = { Authorization: `Bearer ${authToken}` };
       const offset = targetPage * RUNS_PAGE_SIZE;
       const filters = filtersOverride || {
+        keyword: runKeyword,
         startedAtFrom: runStartedAtFrom,
         startedAtTo: runStartedAtTo,
       };
@@ -3561,14 +3572,15 @@ export default function ReconWorkspace({
     } finally {
       setRunsPageLoading(false);
     }
-  }, [authToken, runStartedAtFrom, runStartedAtTo, schemes, tasks]);
+  }, [authToken, runKeyword, runStartedAtFrom, runStartedAtTo, schemes, tasks]);
 
   const handleApplyRunDateFilter = useCallback(() => {
     void loadRunsPage(0);
   }, [loadRunsPage]);
 
   const handleClearRunDateFilter = useCallback(() => {
-    const emptyFilters = { startedAtFrom: '', startedAtTo: '' };
+    const emptyFilters = { keyword: '', startedAtFrom: '', startedAtTo: '' };
+    setRunKeyword('');
     setRunStartedAtFrom('');
     setRunStartedAtTo('');
     void loadRunsPage(0, emptyFilters);
@@ -6127,6 +6139,15 @@ export default function ReconWorkspace({
   const renderRunRows = () =>
     <>
       <div className="flex flex-wrap items-end gap-3 rounded-[26px] border border-border bg-surface px-5 py-4 shadow-sm">
+        <label className="min-w-[220px] flex-1">
+          <span className="text-xs font-medium text-text-secondary">运行计划名</span>
+          <input
+            type="search"
+            value={runKeyword}
+            onChange={(event) => setRunKeyword(event.target.value)}
+            className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
+          />
+        </label>
         <label className="min-w-[180px] flex-1">
           <span className="text-xs font-medium text-text-secondary">开始日期</span>
           <input
@@ -6157,7 +6178,7 @@ export default function ReconWorkspace({
           <button
             type="button"
             onClick={handleClearRunDateFilter}
-            disabled={runsPageLoading || (!runStartedAtFrom && !runStartedAtTo)}
+            disabled={runsPageLoading || (!runKeyword && !runStartedAtFrom && !runStartedAtTo)}
             className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-secondary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             清空
@@ -6170,7 +6191,16 @@ export default function ReconWorkspace({
           description: '对账任务执行后，成功或失败都会在这里沉淀运行记录和异常处理入口。',
         })
       : (
-    <div className="overflow-x-auto rounded-[26px] border border-border bg-surface shadow-sm">
+    <div className="relative overflow-hidden rounded-[26px] border border-border bg-surface shadow-sm">
+      {runsPageLoading ? (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/65 backdrop-blur-[1px]">
+          <div className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-4 py-2 text-sm font-medium text-text-secondary shadow-sm">
+            <RefreshCw className="h-4 w-4 animate-spin" />
+            正在刷新运行记录...
+          </div>
+        </div>
+      ) : null}
+      <div className="overflow-x-auto">
       <div className="min-w-[1080px]">
         <ListHeader
           columns={['运行任务', '运行时间', '异常数', '复核', '状态', '操作']}
@@ -6263,6 +6293,7 @@ export default function ReconWorkspace({
             <ChevronRight className="h-4 w-4" />
           </button>
         </div>
+      </div>
       </div>
     </div>
       )}

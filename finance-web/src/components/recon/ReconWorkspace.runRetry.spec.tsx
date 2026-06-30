@@ -196,6 +196,92 @@ describe('ReconWorkspace run retry actions', () => {
     });
   });
 
+  it('filters run records by plan name keyword', async () => {
+    const fetchMock = setupFetch();
+
+    await renderRunsTab();
+    fireEvent.change(screen.getByLabelText('运行计划名'), { target: { value: ' 资金计划 ' } });
+    fireEvent.click(screen.getByRole('button', { name: '筛选' }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/recon/runs?limit=20&offset=0&keyword=%E8%B5%84%E9%87%91%E8%AE%A1%E5%88%92',
+        expect.any(Object),
+      );
+    });
+  });
+
+  it('clears run keyword and date filters before reloading page one', async () => {
+    const fetchMock = setupFetch();
+
+    await renderRunsTab();
+    fireEvent.change(screen.getByLabelText('运行计划名'), { target: { value: '资金计划' } });
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-06-01' } });
+    fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-06-22' } });
+    fireEvent.click(screen.getByRole('button', { name: '清空' }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/recon/runs?limit=20&offset=0',
+        expect.any(Object),
+      );
+    });
+    expect((screen.getByLabelText('运行计划名') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('开始日期') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('结束日期') as HTMLInputElement).value).toBe('');
+  });
+
+  it('preserves run keyword filter when refreshing the run records tab', async () => {
+    const fetchMock = setupFetch();
+
+    await renderRunsTab();
+    fireEvent.change(screen.getByLabelText('运行计划名'), { target: { value: '资金计划' } });
+    fireEvent.click(screen.getByRole('button', { name: '筛选' }));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/recon/runs?limit=20&offset=0&keyword=%E8%B5%84%E9%87%91%E8%AE%A1%E5%88%92',
+        expect.any(Object),
+      );
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+
+    await waitFor(() => {
+      const filteredCalls = fetchMock.mock.calls.filter(([input]) => (
+        String(input) === '/api/recon/runs?limit=20&offset=0&keyword=%E8%B5%84%E9%87%91%E8%AE%A1%E5%88%92'
+      ));
+      expect(filteredCalls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('shows run list refresh overlay while keeping existing rows visible', async () => {
+    let releaseRunsRefresh = () => {};
+    const fetchMock = setupFetch();
+    const defaultFetchImplementation = fetchMock.getMockImplementation();
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/recon/runs?limit=20&offset=0&keyword=%E8%B5%84%E9%87%91%E8%AE%A1%E5%88%92') {
+        await new Promise<void>((resolve) => {
+          releaseRunsRefresh = resolve;
+        });
+        return jsonResponse({ runs: runsPayload, total: runsPayload.length });
+      }
+      return defaultFetchImplementation!(input, init);
+    });
+
+    await renderRunsTab();
+    fireEvent.change(screen.getByLabelText('运行计划名'), { target: { value: '资金计划' } });
+    fireEvent.click(screen.getByRole('button', { name: '筛选' }));
+
+    expect(await screen.findByText('正在刷新运行记录...')).toBeTruthy();
+    expect(screen.getByTestId('execution-run-row-run-failed')).toBeTruthy();
+
+    releaseRunsRefresh?.();
+    await waitFor(() => {
+      expect(screen.queryByText('正在刷新运行记录...')).toBeNull();
+    });
+  });
+
   it('does not show date field selection when creating a run plan', async () => {
     setupFetch();
 
