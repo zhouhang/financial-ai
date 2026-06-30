@@ -1264,6 +1264,7 @@ async def delete_execution_task_api(
 async def list_execution_runs(
     scheme_code: str = Query(""),
     plan_code: str = Query(""),
+    keyword: str = Query(""),
     started_at_from: str = Query(""),
     started_at_to: str = Query(""),
     limit: int = Query(100, ge=1, le=500),
@@ -1277,6 +1278,7 @@ async def list_execution_runs(
         auth_token,
         scheme_code=scheme_code,
         plan_code=plan_code,
+        keyword=keyword,
         started_at_from=started_at_from,
         started_at_to=started_at_to,
         limit=limit,

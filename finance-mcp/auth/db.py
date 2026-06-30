@@ -10891,6 +10891,7 @@ def list_execution_runs(
     company_id: str,
     scheme_code: str | None = None,
     plan_code: str | None = None,
+    keyword: str | None = None,
     started_at_from: str | None = None,
     started_at_to: str | None = None,
     limit: int = 100,
@@ -10929,6 +10930,10 @@ def list_execution_runs(
                 if plan_code:
                     sql += " AND runs.plan_code = %s"
                     params.append(plan_code)
+                keyword_text = str(keyword or "").strip()
+                if keyword_text:
+                    sql += " AND plan.plan_name ILIKE %s"
+                    params.append(f"%{keyword_text}%")
                 if started_at_from:
                     sql += " AND runs.started_at >= %s"
                     params.append(started_at_from)
@@ -10952,6 +10957,7 @@ def count_execution_runs(
     company_id: str,
     scheme_code: str | None = None,
     plan_code: str | None = None,
+    keyword: str | None = None,
     started_at_from: str | None = None,
     started_at_to: str | None = None,
 ) -> int:
@@ -10960,19 +10966,30 @@ def count_execution_runs(
     try:
         with conn_manager as conn:
             with conn.cursor() as cur:
-                sql = "SELECT count(*) FROM execution_runs WHERE company_id = %s"
+                sql = """
+                    SELECT count(*)
+                    FROM execution_runs runs
+                    LEFT JOIN execution_run_plans plan
+                      ON plan.company_id = runs.company_id
+                     AND plan.plan_code = runs.plan_code
+                    WHERE runs.company_id = %s
+                """
                 params: list[Any] = [company_id]
                 if scheme_code:
-                    sql += " AND scheme_code = %s"
+                    sql += " AND runs.scheme_code = %s"
                     params.append(scheme_code)
                 if plan_code:
-                    sql += " AND plan_code = %s"
+                    sql += " AND runs.plan_code = %s"
                     params.append(plan_code)
+                keyword_text = str(keyword or "").strip()
+                if keyword_text:
+                    sql += " AND plan.plan_name ILIKE %s"
+                    params.append(f"%{keyword_text}%")
                 if started_at_from:
-                    sql += " AND started_at >= %s"
+                    sql += " AND runs.started_at >= %s"
                     params.append(started_at_from)
                 if started_at_to:
-                    sql += " AND started_at < (%s::date + INTERVAL '1 day')"
+                    sql += " AND runs.started_at < (%s::date + INTERVAL '1 day')"
                     params.append(started_at_to)
                 cur.execute(sql, tuple(params))
                 row = cur.fetchone()

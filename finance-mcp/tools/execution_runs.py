@@ -361,6 +361,7 @@ def create_tools() -> list[Tool]:
                     "scheme_id": {"type": "string"},
                     "plan_code": {"type": "string"},
                     "run_plan_id": {"type": "string"},
+                    "keyword": {"type": "string"},
                     "started_at_from": {"type": "string"},
                     "started_at_to": {"type": "string"},
                     "limit": {"type": "integer"},
@@ -2782,6 +2783,7 @@ def _run_list(arguments: dict[str, Any]) -> dict[str, Any]:
         company_id=company_id,
         scheme_code=scheme_code,
         plan_code=plan_code,
+        keyword=_as_text(arguments.get("keyword")),
         started_at_from=_as_text(arguments.get("started_at_from")),
         started_at_to=_as_text(arguments.get("started_at_to")),
         limit=_as_int(arguments.get("limit"), 100, minimum=1, maximum=500),
@@ -2791,6 +2793,7 @@ def _run_list(arguments: dict[str, Any]) -> dict[str, Any]:
         company_id=company_id,
         scheme_code=scheme_code,
         plan_code=plan_code,
+        keyword=_as_text(arguments.get("keyword")),
         started_at_from=_as_text(arguments.get("started_at_from")),
         started_at_to=_as_text(arguments.get("started_at_to")),
     )

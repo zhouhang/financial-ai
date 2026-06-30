@@ -17,6 +17,52 @@ def _fake_user() -> dict[str, str]:
     return {"company_id": "company-1", "user_id": "user-1"}
 
 
+def test_execution_run_list_schema_includes_keyword() -> None:
+    tools = {tool.name: tool for tool in execution_runs.create_tools()}
+
+    schema = tools["execution_run_list"].inputSchema
+
+    assert schema["properties"]["keyword"] == {"type": "string"}
+    assert "keyword" not in schema["required"]
+
+
+def test_run_list_passes_keyword_to_list_and_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, dict[str, Any]] = {}
+
+    def fake_require_user(auth_token: str) -> dict[str, str]:
+        assert auth_token == "token"
+        return _fake_user()
+
+    def fake_list_execution_runs(**kwargs: Any) -> list[dict[str, Any]]:
+        captured["list"] = kwargs
+        return [{"id": "run-1"}]
+
+    def fake_count_execution_runs(**kwargs: Any) -> int:
+        captured["count"] = kwargs
+        return 7
+
+    monkeypatch.setattr(execution_runs, "_require_user", fake_require_user)
+    monkeypatch.setattr(execution_runs.auth_db, "list_execution_runs", fake_list_execution_runs)
+    monkeypatch.setattr(execution_runs.auth_db, "count_execution_runs", fake_count_execution_runs)
+
+    result = execution_runs._run_list(
+        {
+            "auth_token": "token",
+            "scheme_code": "scheme-1",
+            "plan_code": "plan-1",
+            "keyword": "履冰",
+            "started_at_from": "2026-06-01",
+            "started_at_to": "2026-06-22",
+            "limit": 20,
+            "offset": 40,
+        }
+    )
+
+    assert result == {"success": True, "count": 1, "total": 7, "runs": [{"id": "run-1"}]}
+    assert captured["list"]["keyword"] == "履冰"
+    assert captured["count"]["keyword"] == "履冰"
+
+
 def test_run_update_passes_retry_time_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 

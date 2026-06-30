@@ -973,6 +973,7 @@ async def execution_run_list(
     offset: int = 0,
     scheme_code: str = "",
     plan_code: str = "",
+    keyword: str = "",
     started_at_from: str = "",
     started_at_to: str = "",
 ) -> dict[str, Any]:
@@ -981,6 +982,9 @@ async def execution_run_list(
         args["scheme_code"] = scheme_code
     if plan_code:
         args["plan_code"] = plan_code
+    keyword_text = str(keyword or "").strip()
+    if keyword_text:
+        args["keyword"] = keyword_text
     if started_at_from:
         args["started_at_from"] = started_at_from
     if started_at_to:

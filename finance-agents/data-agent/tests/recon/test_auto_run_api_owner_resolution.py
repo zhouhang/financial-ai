@@ -116,6 +116,7 @@ def test_list_execution_runs_api_forwards_started_date_range(
         auto_run_api.list_execution_runs(
             scheme_code="scheme-001",
             plan_code="plan-001",
+            keyword="履冰",
             started_at_from="2026-06-01",
             started_at_to="2026-06-22",
             limit=20,
@@ -128,6 +129,7 @@ def test_list_execution_runs_api_forwards_started_date_range(
     assert captured["auth_token"]
     assert captured["scheme_code"] == "scheme-001"
     assert captured["plan_code"] == "plan-001"
+    assert captured["keyword"] == "履冰"
     assert captured["started_at_from"] == "2026-06-01"
     assert captured["started_at_to"] == "2026-06-22"
     assert captured["limit"] == 20

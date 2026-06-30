@@ -105,6 +105,7 @@ async def test_mcp_client_forwards_execution_run_started_date_range(
         "token",
         scheme_code="scheme-001",
         plan_code="plan-001",
+        keyword="履冰",
         started_at_from="2026-06-01",
         started_at_to="2026-06-22",
         limit=20,
@@ -116,10 +117,31 @@ async def test_mcp_client_forwards_execution_run_started_date_range(
     payload = captured["payload"]
     assert payload["scheme_code"] == "scheme-001"
     assert payload["plan_code"] == "plan-001"
+    assert payload["keyword"] == "履冰"
     assert payload["started_at_from"] == "2026-06-01"
     assert payload["started_at_to"] == "2026-06-22"
     assert payload["limit"] == 20
     assert payload["offset"] == 40
+
+
+@pytest.mark.anyio
+async def test_mcp_client_omits_blank_execution_run_keyword(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_call_mcp_tool(tool_name: str, payload: dict[str, object]) -> dict[str, object]:
+        captured["tool_name"] = tool_name
+        captured["payload"] = payload
+        return {"success": True, "runs": [], "total": 0}
+
+    monkeypatch.setattr(mcp_client, "call_mcp_tool", fake_call_mcp_tool)
+
+    result = await mcp_client.execution_run_list("token", keyword="  ")
+
+    assert result["success"] is True
+    assert captured["tool_name"] == "execution_run_list"
+    assert "keyword" not in captured["payload"]
 
 
 def test_mcp_session_http_clients_ignore_proxy_environment() -> None:

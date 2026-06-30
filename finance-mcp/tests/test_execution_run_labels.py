@@ -137,6 +137,35 @@ def test_count_execution_runs_filters_by_started_at_range(monkeypatch) -> None:
     assert cursor.params[0] == ("company-001", "2026-06-01", "2026-06-22")
 
 
+def test_execution_runs_filter_by_plan_name_keyword(monkeypatch) -> None:
+    list_cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(list_cursor))
+
+    auth_db.list_execution_runs(company_id="company-001", keyword="履冰")
+
+    list_sql = "\n".join(list_cursor.sql)
+    assert "plan.plan_name ILIKE %s" in list_sql
+    assert "scheme.scheme_name ILIKE" not in list_sql
+    assert "runs.execution_status ILIKE" not in list_sql
+    assert "runs.failed_reason ILIKE" not in list_sql
+    assert list_cursor.params[0] == ("company-001", "%履冰%", 100, 0)
+
+    count_cursor = FakeCursor()
+    count_cursor.fetchone_results = [(3,)]
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(count_cursor))
+
+    total = auth_db.count_execution_runs(company_id="company-001", keyword="履冰")
+
+    count_sql = "\n".join(count_cursor.sql)
+    assert total == 3
+    assert "execution_run_plans plan" in count_sql
+    assert "plan.plan_name ILIKE %s" in count_sql
+    assert "scheme_name ILIKE" not in count_sql
+    assert "execution_status ILIKE" not in count_sql
+    assert "failed_reason ILIKE" not in count_sql
+    assert count_cursor.params[0] == ("company-001", "%履冰%")
+
+
 def test_run_exceptions_returns_current_run_scheme_for_display(monkeypatch) -> None:
     from tools import execution_runs
 
