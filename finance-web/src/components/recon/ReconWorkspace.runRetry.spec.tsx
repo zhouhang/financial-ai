@@ -255,6 +255,35 @@ describe('ReconWorkspace run retry actions', () => {
     });
   });
 
+  it('uses applied run keyword filter when refreshing after unsubmitted input edits', async () => {
+    const fetchMock = setupFetch();
+
+    await renderRunsTab();
+    fireEvent.change(screen.getByLabelText('运行计划名'), { target: { value: '资金计划' } });
+    fireEvent.click(screen.getByRole('button', { name: '筛选' }));
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/recon/runs?limit=20&offset=0&keyword=%E8%B5%84%E9%87%91%E8%AE%A1%E5%88%92',
+        expect.any(Object),
+      );
+    });
+
+    fetchMock.mockClear();
+    fireEvent.change(screen.getByLabelText('运行计划名'), { target: { value: '其他计划' } });
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/recon/runs?limit=20&offset=0&keyword=%E8%B5%84%E9%87%91%E8%AE%A1%E5%88%92',
+        expect.any(Object),
+      );
+    });
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      '/api/recon/runs?limit=20&offset=0&keyword=%E5%85%B6%E4%BB%96%E8%AE%A1%E5%88%92',
+      expect.any(Object),
+    );
+  });
+
   it('shows run list refresh overlay while keeping existing rows visible', async () => {
     let releaseRunsRefresh = () => {};
     const fetchMock = setupFetch();

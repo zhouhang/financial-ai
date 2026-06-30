@@ -789,6 +789,8 @@ function buildRunListQuery(
   return params.toString();
 }
 
+const EMPTY_RUN_FILTERS = { keyword: '', startedAtFrom: '', startedAtTo: '' };
+
 function getOpenDiffCount(run: ReconCenterRunItem): number {
   const summary = asRecord(run.raw.recon_result_summary_json);
   const sourceOnly = toInt(summary.source_only, 0);
@@ -3132,9 +3134,10 @@ export default function ReconWorkspace({
   const [runsHasMore, setRunsHasMore] = useState(false);
   const [runsPageLoading, setRunsPageLoading] = useState(false);
   const [runsTotal, setRunsTotal] = useState(0);
-  const [runKeyword, setRunKeyword] = useState('');
-  const [runStartedAtFrom, setRunStartedAtFrom] = useState('');
-  const [runStartedAtTo, setRunStartedAtTo] = useState('');
+  const [runDraftKeyword, setRunDraftKeyword] = useState('');
+  const [runDraftStartedAtFrom, setRunDraftStartedAtFrom] = useState('');
+  const [runDraftStartedAtTo, setRunDraftStartedAtTo] = useState('');
+  const [appliedRunFilters, setAppliedRunFilters] = useState(EMPTY_RUN_FILTERS);
   const [exceptionsByRunId, setExceptionsByRunId] = useState<Record<string, ReconRunExceptionDetail[]>>({});
   const [schemesByRunId, setSchemesByRunId] = useState<Record<string, ReconSchemeListItem>>({});
   const [availableChannels, setAvailableChannels] = useState<CollaborationChannelListItem[]>([]);
@@ -3445,11 +3448,7 @@ export default function ReconWorkspace({
         fetchReconAutoApi(`/schemes?include_disabled=false&limit=${SCHEMES_PAGE_SIZE}&offset=0`, { headers }),
         fetchReconAutoApi(`/tasks?limit=${TASKS_PAGE_SIZE}&offset=0`, { headers }),
         fetchReconAutoApi(
-          `/runs?${buildRunListQuery(RUNS_PAGE_SIZE, 0, {
-            keyword: '',
-            startedAtFrom: '',
-            startedAtTo: '',
-          })}`,
+          `/runs?${buildRunListQuery(RUNS_PAGE_SIZE, 0, EMPTY_RUN_FILTERS)}`,
           { headers },
         ),
       ]);
@@ -3540,11 +3539,7 @@ export default function ReconWorkspace({
     try {
       const headers = { Authorization: `Bearer ${authToken}` };
       const offset = targetPage * RUNS_PAGE_SIZE;
-      const filters = filtersOverride || {
-        keyword: runKeyword,
-        startedAtFrom: runStartedAtFrom,
-        startedAtTo: runStartedAtTo,
-      };
+      const filters = filtersOverride || appliedRunFilters;
       const response = await fetchReconAutoApi(
         `/runs?${buildRunListQuery(RUNS_PAGE_SIZE, offset, filters)}`,
         { headers },
@@ -3572,18 +3567,24 @@ export default function ReconWorkspace({
     } finally {
       setRunsPageLoading(false);
     }
-  }, [authToken, runKeyword, runStartedAtFrom, runStartedAtTo, schemes, tasks]);
+  }, [appliedRunFilters, authToken, schemes, tasks]);
 
   const handleApplyRunDateFilter = useCallback(() => {
-    void loadRunsPage(0);
-  }, [loadRunsPage]);
+    const nextFilters = {
+      keyword: runDraftKeyword,
+      startedAtFrom: runDraftStartedAtFrom,
+      startedAtTo: runDraftStartedAtTo,
+    };
+    setAppliedRunFilters(nextFilters);
+    void loadRunsPage(0, nextFilters);
+  }, [loadRunsPage, runDraftKeyword, runDraftStartedAtFrom, runDraftStartedAtTo]);
 
   const handleClearRunDateFilter = useCallback(() => {
-    const emptyFilters = { keyword: '', startedAtFrom: '', startedAtTo: '' };
-    setRunKeyword('');
-    setRunStartedAtFrom('');
-    setRunStartedAtTo('');
-    void loadRunsPage(0, emptyFilters);
+    setRunDraftKeyword('');
+    setRunDraftStartedAtFrom('');
+    setRunDraftStartedAtTo('');
+    setAppliedRunFilters(EMPTY_RUN_FILTERS);
+    void loadRunsPage(0, EMPTY_RUN_FILTERS);
   }, [loadRunsPage]);
 
   const refreshRunQuietly = useCallback(async (runId: string): Promise<ReconCenterRunItem | null> => {
@@ -6143,8 +6144,8 @@ export default function ReconWorkspace({
           <span className="text-xs font-medium text-text-secondary">运行计划名</span>
           <input
             type="search"
-            value={runKeyword}
-            onChange={(event) => setRunKeyword(event.target.value)}
+            value={runDraftKeyword}
+            onChange={(event) => setRunDraftKeyword(event.target.value)}
             className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
           />
         </label>
@@ -6152,8 +6153,8 @@ export default function ReconWorkspace({
           <span className="text-xs font-medium text-text-secondary">开始日期</span>
           <input
             type="date"
-            value={runStartedAtFrom}
-            onChange={(event) => setRunStartedAtFrom(event.target.value)}
+            value={runDraftStartedAtFrom}
+            onChange={(event) => setRunDraftStartedAtFrom(event.target.value)}
             className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
           />
         </label>
@@ -6161,8 +6162,8 @@ export default function ReconWorkspace({
           <span className="text-xs font-medium text-text-secondary">结束日期</span>
           <input
             type="date"
-            value={runStartedAtTo}
-            onChange={(event) => setRunStartedAtTo(event.target.value)}
+            value={runDraftStartedAtTo}
+            onChange={(event) => setRunDraftStartedAtTo(event.target.value)}
             className="mt-1.5 w-full rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-sky-300 focus:ring-2 focus:ring-sky-100"
           />
         </label>
@@ -6178,7 +6179,7 @@ export default function ReconWorkspace({
           <button
             type="button"
             onClick={handleClearRunDateFilter}
-            disabled={runsPageLoading || (!runKeyword && !runStartedAtFrom && !runStartedAtTo)}
+            disabled={runsPageLoading || (!runDraftKeyword && !runDraftStartedAtFrom && !runDraftStartedAtTo)}
             className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-2.5 text-sm text-text-secondary transition hover:border-sky-200 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             清空
