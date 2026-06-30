@@ -121,7 +121,24 @@ def test_fail_expired_waiting_exempts_empty_result_retry(monkeypatch) -> None:
     assert "wait_deadline_at <= CURRENT_TIMESTAMP" in sql
     assert "EMPTY_RESULT" in sql
     assert "next_retry_at IS NOT NULL" in sql
+    assert "BROWSER_EMPTY_RETRY_CUTOFF_GRACE_SECONDS" not in sql
     assert "TIME '18:30'" in sql
+
+
+def test_fail_expired_waiting_keeps_empty_result_active_after_cutoff(monkeypatch) -> None:
+    cursor = FakeCursor()
+    monkeypatch.setattr(auth_db, "get_conn", lambda: FakeConnManager(cursor))
+
+    auth_db.fail_expired_waiting_recon_runs()
+
+    sql = "\n".join(cursor.sql)
+    assert "s.browser_fail_reason = 'EMPTY_RESULT'" in sql
+    assert "s.job_status IN ('pending', 'queued', 'running')" in sql
+    # The collection job owns the cutoff decision, but waiting_data only gives a bounded
+    # post-cutoff grace period so an offline collector cannot keep the recon run forever.
+    empty_result_guard = sql.split("s.browser_fail_reason = 'EMPTY_RESULT'", 1)[0]
+    assert "CURRENT_TIMESTAMP < (CURRENT_DATE + TIME '18:30')" not in empty_result_guard
+    assert "CURRENT_DATE + TIME '18:30' + (%s * INTERVAL '1 second')" in sql
 
 
 def test_success_collection_job_lookup_excludes_verification_jobs(monkeypatch) -> None:

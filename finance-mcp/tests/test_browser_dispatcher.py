@@ -2655,11 +2655,11 @@ def test_empty_retry_cutoff_passed_boundary() -> None:
 # ── Empty-result retry: handler routing ──────────────────────────────────────
 
 
-def _run_complete_empty(monkeypatch, *, recent: bool, cutoff_passed: bool) -> dict:
+def _run_complete_empty(monkeypatch, *, recent: bool, cutoff_passed: bool, ds=None) -> dict:
     import asyncio
     from contextlib import nullcontext
 
-    ds = _import_mcp_data_sources()
+    ds = ds or _import_mcp_data_sources()
 
     fake_job = {
         "id": "j",
@@ -2720,6 +2720,18 @@ def test_empty_recent_before_cutoff_defers(monkeypatch) -> None:
     assert calls["failed"]["retryable"] is True
     ds = _import_mcp_data_sources()
     assert calls["failed"]["retry_delay_seconds"] == ds.EMPTY_RETRY_DELAY_SECONDS
+
+
+def test_empty_recent_before_cutoff_caps_retry_delay_at_cutoff(monkeypatch) -> None:
+    tz8 = timezone(timedelta(hours=8))
+    now = datetime(2026, 6, 29, 17, 49, tzinfo=tz8).astimezone(timezone.utc)
+    ds = _import_mcp_data_sources()
+    monkeypatch.setattr(ds, "_now_utc", lambda: now, raising=False)
+    calls = _run_complete_empty(monkeypatch, recent=True, cutoff_passed=False, ds=ds)
+
+    assert calls["failed"] is not None
+    assert 0 < calls["failed"]["retry_delay_seconds"] <= 41 * 60
+    assert calls["failed"]["retry_delay_seconds"] < ds.EMPTY_RETRY_DELAY_SECONDS
 
 
 def test_empty_recent_after_cutoff_succeeds(monkeypatch) -> None:

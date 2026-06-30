@@ -33,6 +33,10 @@ _RECON_WAITING_DATA_RETRY_SECONDS = max(
     5,
     int(os.getenv("RECON_WAITING_DATA_RETRY_SECONDS", "30") or "30"),
 )
+_BROWSER_EMPTY_RETRY_CUTOFF_GRACE_SECONDS = max(
+    60,
+    int(os.getenv("BROWSER_EMPTY_RETRY_CUTOFF_GRACE_SECONDS", "1800") or "1800"),
+)
 _UNIFIED_DATA_SOURCE_SCHEMA_READY = False
 _EXECUTION_RUN_TRIGGER_TYPES_SCHEMA_READY = False
 _AUTH_SESSIONS_EXTRA_SCHEMA_READY = False
@@ -7287,11 +7291,14 @@ def fail_expired_waiting_recon_runs() -> int:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE status = 'waiting_data'
                       AND wait_deadline_at <= CURRENT_TIMESTAMP
-                      -- 豁免：所等浏览器采集仍在 EMPTY_RESULT 小时级重试中、且未过当日 18:30 cutoff，
-                      -- 视为"在等今天还没生成的账单"，不按 90 分钟死线误杀；其余一律维持快失败。
+                      -- 豁免：所等浏览器采集仍在 EMPTY_RESULT 小时级重试/执行中。
+                      -- 采集 job 自己负责 18:30 cutoff 决策；对账侧只给有限 grace，
+                      -- 避免 18:30 整点抢先失败,也避免采集机离线时无限等待。
                       AND NOT (
-                          CURRENT_TIMESTAMP < (CURRENT_DATE + TIME '18:30')
-                          AND jsonb_typeof(collection_job_ids) = 'array'
+                          jsonb_typeof(collection_job_ids) = 'array'
+                          AND CURRENT_TIMESTAMP < (
+                              CURRENT_DATE + TIME '18:30' + (%s * INTERVAL '1 second')
+                          )
                           AND EXISTS (
                               SELECT 1
                               FROM jsonb_array_elements_text(collection_job_ids) jid
@@ -7306,6 +7313,8 @@ def fail_expired_waiting_recon_runs() -> int:
                       )
                     RETURNING id, company_id, '等待采集数据超时:截止前采集未出数(为空或未完成),本次对账未执行'
                     """
+                    ,
+                    (_BROWSER_EMPTY_RETRY_CUTOFF_GRACE_SECONDS,),
                 )
                 rows = cur.fetchall() or []
                 for queue_id, company_id, failed_error in rows:

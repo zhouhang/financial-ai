@@ -154,12 +154,31 @@ EMPTY_RETRY_DELAY_SECONDS = int(os.getenv("BROWSER_EMPTY_RETRY_DELAY_SECONDS", "
 EMPTY_RETRY_MAX_ATTEMPTS = int(os.getenv("BROWSER_EMPTY_RETRY_MAX_ATTEMPTS", "24"))
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _empty_retry_cutoff_at(now: datetime | None = None) -> datetime:
+    now_local = (now or _now_utc()).astimezone(TAOBAO_TZ)
+    hh, mm = (int(x) for x in EMPTY_RETRY_CUTOFF_HHMM.split(":"))
+    return now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+
+
 def _empty_retry_cutoff_passed(now: datetime | None = None) -> bool:
     """当前（UTC+8）是否已到/过当日空采集重试 cutoff（默认 18:30）。"""
-    now_local = (now or datetime.now(timezone.utc)).astimezone(TAOBAO_TZ)
-    hh, mm = (int(x) for x in EMPTY_RETRY_CUTOFF_HHMM.split(":"))
-    cutoff = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
-    return now_local >= cutoff
+    now_local = (now or _now_utc()).astimezone(TAOBAO_TZ)
+    return now_local >= _empty_retry_cutoff_at(now)
+
+
+def _empty_retry_delay_seconds(now: datetime | None = None) -> int:
+    """下一次 EMPTY_RESULT 重试 delay，不跨过当日 cutoff。"""
+    now_local = (now or _now_utc()).astimezone(TAOBAO_TZ)
+    cutoff = _empty_retry_cutoff_at(now_local)
+    remaining = int((cutoff - now_local).total_seconds())
+    if remaining <= 0:
+        return 0
+    return max(1, min(int(EMPTY_RETRY_DELAY_SECONDS), remaining))
+
 
 
 PLATFORM_TOKEN_REFRESH_THRESHOLD = timedelta(minutes=30)
@@ -10775,6 +10794,7 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
             )
             and not _empty_retry_cutoff_passed()
         ):
+            retry_delay_seconds = _empty_retry_delay_seconds()
             deferred = auth_db.mark_browser_sync_job_failed(
                 sync_job_id=sync_job_id,
                 error_message=(
@@ -10783,7 +10803,7 @@ async def _handle_browser_sync_job_complete(arguments: dict[str, Any]) -> dict[s
                 ),
                 fail_reason="EMPTY_RESULT",
                 retryable=True,
-                retry_delay_seconds=EMPTY_RETRY_DELAY_SECONDS,
+                retry_delay_seconds=retry_delay_seconds,
                 max_attempts=EMPTY_RETRY_MAX_ATTEMPTS,
                 allowed_current_statuses=tuple(BROWSER_SYNC_WORKER_MUTABLE_STATUSES),
             )
