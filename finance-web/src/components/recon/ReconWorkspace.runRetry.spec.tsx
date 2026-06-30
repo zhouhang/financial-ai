@@ -215,6 +215,7 @@ describe('ReconWorkspace run retry actions', () => {
     const fetchMock = setupFetch();
 
     await renderRunsTab();
+    fetchMock.mockClear();
     fireEvent.change(screen.getByLabelText('运行计划名'), { target: { value: '资金计划' } });
     fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2026-06-01' } });
     fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2026-06-22' } });

@@ -6194,8 +6194,12 @@ export default function ReconWorkspace({
     <div className="relative overflow-hidden rounded-[26px] border border-border bg-surface shadow-sm">
       {runsPageLoading ? (
         <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/65 backdrop-blur-[1px]">
-          <div className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-4 py-2 text-sm font-medium text-text-secondary shadow-sm">
-            <RefreshCw className="h-4 w-4 animate-spin" />
+          <div
+            role="status"
+            aria-live="polite"
+            className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-4 py-2 text-sm font-medium text-text-secondary shadow-sm"
+          >
+            <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
             正在刷新运行记录...
           </div>
         </div>
