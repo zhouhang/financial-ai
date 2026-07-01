@@ -291,6 +291,15 @@ def collect_browser_alert_events(
                           b.last_collection_at IS NULL
                           OR b.last_collection_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 hour')
                       )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM sync_jobs s
+                          WHERE s.company_id = b.company_id
+                            AND s.data_source_id = b.data_source_id
+                            AND s.browser_fail_reason = 'EMPTY_RESULT'
+                            AND s.job_status IN ('pending', 'queued', 'running')
+                            AND s.next_retry_at IS NOT NULL
+                      )
                     ORDER BY b.updated_at DESC
                     LIMIT 100
                     """,

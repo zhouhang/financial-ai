@@ -199,6 +199,46 @@ def test_missed_success_alerts_only_scan_browser_sources_referenced_by_enabled_r
     assert "is_enabled = TRUE" in missed_success_sql
 
 
+def test_missed_success_alerts_ignore_empty_result_retrying_jobs(monkeypatch) -> None:
+    executed_sql: list[str] = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def execute(self, sql: str, params=None) -> None:
+            executed_sql.append(sql)
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def cursor(self, *args, **kwargs):
+            return Cursor()
+
+    monkeypatch.setattr(browser_alerts.psycopg2, "connect", lambda *_args, **_kwargs: Connection())
+
+    browser_alerts.collect_browser_alert_events()
+
+    missed_success_sql = next(
+        sql
+        for sql in executed_sql
+        if "FROM shop_runtime_bindings b" in sql and "last_collection_at" in sql
+    )
+    assert "NOT EXISTS" in missed_success_sql
+    assert "s.browser_fail_reason = 'EMPTY_RESULT'" in missed_success_sql
+    assert "s.job_status IN ('pending', 'queued', 'running')" in missed_success_sql
+
+
 def test_browser_alert_service_dedupes_existing_alert() -> None:
     adapter = FakeAdapter()
     service = BrowserAlertService(
